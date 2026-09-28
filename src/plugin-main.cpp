@@ -288,12 +288,13 @@ static void queueAsset(const QString &url, bool catalog = false, const QString &
 
 static void processBadgeCatalog(const QByteArray &bytes, const QString &room_id)
 {
-	const QJsonObject sets = QJsonDocument::fromJson(bytes).object().value("badge_sets").toObject();
-	for (auto set = sets.begin(); set != sets.end(); ++set) {
-		const QJsonObject versions = set.value().toObject().value("versions").toObject();
-		for (auto version = versions.begin(); version != versions.end(); ++version) {
-			const QString image = version.value().toObject().value("image_url_2x").toString();
-			const QString key = set.key() + "/" + version.key();
+	const QJsonArray sets = QJsonDocument::fromJson(bytes).array();
+	for (const QJsonValue &set_value : sets) {
+		const QJsonObject set = set_value.toObject();
+		for (const QJsonValue &version_value : set.value("versions").toArray()) {
+			const QJsonObject version = version_value.toObject();
+			const QString image = version.value("image_url_2x").toString();
+			const QString key = set.value("id").toString() + "/" + version.value("id").toString();
 			if (QUrl(image).host() == "static-cdn.jtvnw.net" &&
 			    (!room_id.isEmpty() || !channel_badge_keys.contains(key))) {
 				twitch_badge_images.insert(key, image);
@@ -439,8 +440,8 @@ static void requestTwitchBadges(const QString &room_id)
 	    (!room_id.isEmpty() && !QRegularExpression("^[0-9]+$").match(room_id).hasMatch()))
 		return;
 	loaded_badge_catalogs.insert(room_id);
-	const QUrl url("https://badges.twitch.tv/v1/badges/" +
-		       (room_id.isEmpty() ? QString("global") : QString("channels/") + room_id) + "/display");
+	const QUrl url("https://unttv.vercel.app/badges/" +
+		       (room_id.isEmpty() ? QString("global") : QString("channel/") + room_id));
 	queueAsset(url.toString(), true, room_id);
 }
 
