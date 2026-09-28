@@ -27,13 +27,16 @@ a fonte de navegador em tempo real.
 O OBS salva a fonte nas cenas e o plugin atualiza seu endereço local ao reiniciar.
 A fonte de texto anterior Zosma Multichat é removida na primeira ativação
 da fonte de navegador. O painel usa apenas o símbolo da plataforma em cada
-mensagem. As badges da Twitch são identificadas pelas tags IRC e consultadas
-pela API pública UNTTV (unttv.vercel.app), incluindo as específicas do canal;
-o carregamento dessas badges depende da disponibilidade desse serviço. Emotes da
+mensagem. Quando OBS Browser está disponível, o plugin mantém as páginas do chat
+da Twitch e da Kick carregadas fora da tela. Ele captura as imagens das badges
+diretamente dessas páginas, inclusive SVGs e badges próprias de cada canal.
+As mensagens continuam vindo das conexões já existentes. A captura visual das
+badges depende da página de chat carregar e apresentar cada mensagem; não exige
+que a janela do chat permaneça visível. Emotes da
 Twitch e da Kick aparecem como imagens na transmissão e como imagem estática
 no painel quando carregam. Badges da Kick são mostradas pelo nome; quando o
-evento inclui uma URL de imagem válida, essa imagem é usada. A API pública de
-mensagens da Kick não fornece as imagens das badges personalizadas do canal.
+evento inclui uma URL de imagem válida, essa imagem é usada. Quando uma badge
+ainda não apareceu no chat renderizado, o plugin mostra seu nome até capturá-la.
 O plugin baixa as
 imagens com libcurl e as fornece à fonte de navegador pelo servidor local;
 o painel indica quantas imagens carregaram e quantas ficaram indisponíveis.

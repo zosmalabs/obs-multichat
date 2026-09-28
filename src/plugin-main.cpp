@@ -1,6 +1,7 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
+#include <util/platform.h>
 
 #include <QCheckBox>
 #include <QColorDialog>
@@ -36,6 +37,8 @@
 #include <QTimer>
 #include <QRandomGenerator>
 #include "kick-client.h"
+#include "hidden-browser.h"
+#include "capture-script.h"
 #include "youtube-client.h"
 #include <QUrlQuery>
 #include <QStringList>
@@ -69,6 +72,13 @@ static QSet<QString> failed_images;
 static QJsonObject twitch_badge_images;
 static QSet<QString> loaded_badge_catalogs;
 static QSet<QString> channel_badge_keys;
+static QHash<QString, QJsonArray> captured_badges;
+static QPointer<QWidget> capture_window;
+static QPointer<QCefWidget> twitch_capture;
+static QPointer<QCefWidget> kick_capture;
+static QCef *capture_cef = nullptr;
+static QString capture_twitch_channel;
+static QString capture_kick_channel;
 struct AssetRequest {
 	CURL *handle = nullptr;
 	QByteArray bytes;
@@ -82,6 +92,8 @@ static QHash<CURL *, AssetRequest *> asset_requests;
 
 static void renderPanel();
 static void requestChatImage(const QString &url);
+static void receiveCapturedBadges(const QByteArray &bytes);
+static void startCapture(const QString &twitch, const QString &kick);
 
 static QString cssColor(const QColor &color)
 {
@@ -162,12 +174,55 @@ static bool startOverlayServer(QWidget *parent)
 		while (overlay_server && overlay_server->hasPendingConnections()) {
 			QTcpSocket *socket = overlay_server->nextPendingConnection();
 			QObject::connect(socket, &QTcpSocket::readyRead, parent, [socket]() {
-				if (!socket->canReadLine())
-					return;
-				const QByteArray request = socket->readLine();
-				socket->readAll();
 				if (socket->property("stream").toBool())
 					return;
+				QByteArray buffer = socket->property("requestBuffer").toByteArray() + socket->readAll();
+				if (buffer.size() > 96 * 1024) {
+					socket->disconnectFromHost();
+					return;
+				}
+				const int headers_end = buffer.indexOf("\r\n\r\n");
+				if (headers_end < 0) {
+					socket->setProperty("requestBuffer", buffer);
+					return;
+				}
+				const QByteArray request = buffer.left(buffer.indexOf("\r\n"));
+				if (request.contains("/capture ") &&
+				    !buffer.left(headers_end).contains("Origin: https://www.twitch.tv") &&
+				    !buffer.left(headers_end).contains("Origin: https://kick.com")) {
+					socket->disconnectFromHost();
+					return;
+				}
+				if (request.startsWith("OPTIONS /capture ")) {
+					socket->write(
+						"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+						"Access-Control-Allow-Methods: POST, OPTIONS\r\n"
+						"Access-Control-Allow-Headers: content-type\r\n"
+						"Access-Control-Allow-Private-Network: true\r\nContent-Length: 0\r\n\r\n");
+					socket->disconnectFromHost();
+					return;
+				}
+				if (request.startsWith("POST /capture ")) {
+					const QRegularExpression length_pattern(
+						"(?:^|\\r\\n)Content-Length: ([0-9]+)",
+						QRegularExpression::CaseInsensitiveOption);
+					const auto match =
+						length_pattern.match(QString::fromLatin1(buffer.left(headers_end)));
+					const int length = match.hasMatch() ? match.captured(1).toInt() : -1;
+					if (length < 0 || length > 80 * 1024) {
+						socket->disconnectFromHost();
+						return;
+					}
+					if (buffer.size() - headers_end - 4 < length) {
+						socket->setProperty("requestBuffer", buffer);
+						return;
+					}
+					receiveCapturedBadges(buffer.mid(headers_end + 4, length));
+					socket->write("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+						      "Content-Length: 0\r\nConnection: close\r\n\r\n");
+					socket->disconnectFromHost();
+					return;
+				}
 				if (!request.startsWith("GET ") || !request.contains("HTTP/1.")) {
 					socket->disconnectFromHost();
 					return;
@@ -434,17 +489,6 @@ static void renderPanel()
 	scroll->setValue(at_bottom ? scroll->maximum() : previous);
 }
 
-static void requestTwitchBadges(const QString &room_id)
-{
-	if (!asset_multi || loaded_badge_catalogs.contains(room_id) ||
-	    (!room_id.isEmpty() && !QRegularExpression("^[0-9]+$").match(room_id).hasMatch()))
-		return;
-	loaded_badge_catalogs.insert(room_id);
-	const QUrl url("https://unttv.vercel.app/badges/" +
-		       (room_id.isEmpty() ? QString("global") : QString("channel/") + room_id));
-	queueAsset(url.toString(), true, room_id);
-}
-
 static bool attachOverlay()
 {
 	if (shutting_down || !overlay_server || !overlay_server->isListening())
@@ -490,6 +534,65 @@ static bool attachOverlay()
 	return attached;
 }
 
+static void receiveCapturedBadges(const QByteArray &bytes)
+{
+	const QJsonObject payload = QJsonDocument::fromJson(bytes).object();
+	const QString platform = payload.value("platform").toString();
+	const QString name = payload.value("name").toString().left(80);
+	if ((platform != "Kick" && platform != "Twitch") || name.isEmpty())
+		return;
+	QJsonArray badges;
+	for (const QJsonValue value : payload.value("badges").toArray()) {
+		if (badges.size() >= 15)
+			break;
+		const QJsonObject badge = value.toObject();
+		QString url = badge.value("image").toString();
+		if (url.startsWith("data:image/png;base64,")) {
+			const QByteArray image_data = QByteArray::fromBase64(url.mid(22).toLatin1());
+			QImage image;
+			if (image_data.size() > 32 * 1024 || !image.loadFromData(image_data))
+				continue;
+			url = "capture:" +
+			      QString::fromLatin1(
+				      QCryptographicHash::hash(image_data, QCryptographicHash::Sha256).toHex());
+			image_cache.insert(url, image);
+			image_bytes.insert(url, image_data);
+			const QString token = url.mid(8);
+			image_tokens.insert(url, token);
+			token_urls.insert(token, url);
+		} else if (QUrl(url).scheme() != "https" ||
+			   (QUrl(url).host() != "static-cdn.jtvnw.net" && QUrl(url).host() != "files.kick.com" &&
+			    QUrl(url).host() != "cdn.kick.com")) {
+			continue;
+		}
+		badges.append(QJsonObject{{"label", badge.value("label").toString().left(40)}, {"image", url}});
+	}
+	if (badges.isEmpty())
+		return;
+	const QString key = platform + ":" + name.toLower();
+	if (captured_badges.size() > 200)
+		captured_badges.clear();
+	captured_badges.insert(key, badges);
+	for (QJsonObject &entry : panel_history)
+		if (entry.value("platform").toString() == platform &&
+		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0)
+			entry.insert("badges", badges);
+	for (int i = 0; i < overlay_messages.size(); ++i) {
+		QJsonObject entry = overlay_messages[i].toObject();
+		if (entry.value("platform").toString() == platform &&
+		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0) {
+			entry.insert("badges", badges);
+			overlay_messages.replace(i, entry);
+		}
+	}
+	if (image_status)
+		image_status->setText(QString::fromUtf8("Imagens carregadas: %1 · indisponíveis: %2")
+					      .arg(image_cache.size())
+					      .arg(failed_images.size()));
+	renderPanel();
+	refreshOverlay();
+}
+
 static void appendChat(const QString &platform, const QString &name, const QString &message,
 		       const QJsonArray &badges = {}, const QJsonArray &emotes = {})
 {
@@ -497,7 +600,7 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 	entry.insert("platform", platform);
 	entry.insert("name", name.left(80));
 	entry.insert("message", message.left(500));
-	entry.insert("badges", badges);
+	entry.insert("badges", captured_badges.value(platform + ":" + name.toLower(), badges));
 	entry.insert("emotes", emotes);
 	overlay_messages.append(entry);
 	while (overlay_messages.size() > 50)
@@ -565,10 +668,15 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 {
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
 		shutting_down = true;
+		if (capture_window)
+			capture_window->close();
 		if (overlay_server)
 			overlay_server->close();
-	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING ||
-		   event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
+	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+		startCapture(capture_twitch_channel, capture_kick_channel);
+		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
+			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat Web ativa na cena atual."));
+	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
 		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
 			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat Web ativa na cena atual."));
 	}
@@ -664,6 +772,66 @@ static bool validSource(int platform, const QString &value)
 	return false;
 }
 
+static void startCapture(const QString &twitch, const QString &kick)
+{
+	if (shutting_down || !overlay_server || (!capture_window && twitch.isEmpty() && kick.isEmpty()))
+		return;
+	if (!capture_cef) {
+		obs_module_t *module = obs_get_module("obs-browser");
+		if (!module)
+			return;
+		using CreateCef = QCef *(*)();
+		const auto create =
+			reinterpret_cast<CreateCef>(os_dlsym(obs_get_module_lib(module), "obs_browser_create_qcef"));
+		if (!create)
+			return;
+		capture_cef = create();
+		if (!capture_cef)
+			return;
+		capture_cef->init_browser();
+	}
+	if (!capture_cef->initialized())
+		return;
+	if (!capture_window) {
+		capture_window = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint);
+		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
+		capture_window->setGeometry(-3000, -3000, 760, 600);
+		capture_window->show();
+	}
+	const QByteArray script =
+		QByteArray(capture_script)
+			.replace("__ZOSMA_ENDPOINT__",
+				 "http://127.0.0.1:" + QByteArray::number(overlay_server->serverPort()) + "/capture");
+	auto update = [&](QPointer<QCefWidget> &widget, const QString &channel, const QString &url, int x) {
+		if (channel.isEmpty()) {
+			if (widget) {
+				widget->closeBrowser();
+				delete widget;
+				widget = nullptr;
+			}
+			return;
+		}
+		if (!widget) {
+			widget = capture_cef->create_widget(capture_window, "about:blank");
+			if (!widget)
+				return;
+			widget->setGeometry(x, 0, 380, 600);
+			widget->setStartupScript(script.toStdString());
+			widget->allowAllPopups(false);
+			widget->show();
+		}
+		widget->setURL(url.toStdString());
+	};
+	if (twitch != capture_twitch_channel || !twitch_capture) {
+		capture_twitch_channel = twitch;
+		update(twitch_capture, twitch, "https://www.twitch.tv/popout/" + twitch + "/chat?popout=", 0);
+	}
+	if (kick != capture_kick_channel || !kick_capture) {
+		capture_kick_channel = kick;
+		update(kick_capture, kick, "https://kick.com/popout/" + kick + "/chat", 380);
+	}
+}
+
 bool obs_module_load(void)
 {
 	// OBS creates the dock and its toggle in Exibir > Paineis.
@@ -738,7 +906,6 @@ bool obs_module_load(void)
 	asset_timer = new QTimer(body);
 	asset_timer->setInterval(80);
 	QObject::connect(asset_timer, &QTimer::timeout, body, pollAssets);
-	requestTwitchBadges({});
 	messages->setOpenExternalLinks(false);
 	messages->setPlaceholderText(
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
@@ -910,7 +1077,6 @@ bool obs_module_load(void)
 			if (name.isEmpty())
 				continue;
 			const QString message = QString::fromUtf8(line.mid(content + 2));
-			requestTwitchBadges(QString::fromLatin1(tags_map.value("room-id")));
 			QJsonArray badges;
 			for (const QByteArray &badge : tags_map.value("badges").split(',')) {
 				if (badge.isEmpty())
@@ -963,7 +1129,9 @@ bool obs_module_load(void)
 				return;
 			}
 			*channel = twitchChannel(inputs[0]->text());
-			kick->start(kickChannel(inputs[1]->text()));
+			const QString kick_name = kickChannel(inputs[1]->text());
+			kick->start(kick_name);
+			startCapture(*channel, kick_name);
 			youtube->start(youtubeVideoId(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
@@ -976,7 +1144,9 @@ bool obs_module_load(void)
 			}
 		});
 	*channel = twitchChannel(inputs[0]->text());
-	kick->start(kickChannel(inputs[1]->text()));
+	capture_twitch_channel = *channel;
+	capture_kick_channel = kickChannel(inputs[1]->text());
+	kick->start(capture_kick_channel);
 	youtube->start(youtubeVideoId(inputs[2]->text()));
 	if (!channel->isEmpty())
 		connectChat();
@@ -1000,6 +1170,15 @@ bool obs_module_load(void)
 		return false;
 	}
 	startOverlayServer(body);
+	auto *capture_retry = new QTimer(body);
+	capture_retry->setInterval(6000);
+	QObject::connect(capture_retry, &QTimer::timeout, body, []() {
+		if ((!capture_twitch_channel.isEmpty() && !twitch_capture) ||
+		    (!capture_kick_channel.isEmpty() && !kick_capture))
+			startCapture(capture_twitch_channel, capture_kick_channel);
+	});
+	capture_retry->start();
+	startCapture(capture_twitch_channel, capture_kick_channel);
 	dock_registered = true;
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	obs_log(LOG_INFO, "Multichat test dock loaded");
@@ -1017,6 +1196,18 @@ void obs_module_unload(void)
 	image_status = nullptr;
 	if (asset_timer)
 		asset_timer->stop();
+	if (capture_window) {
+		if (twitch_capture)
+			twitch_capture->closeBrowser();
+		if (kick_capture)
+			kick_capture->closeBrowser();
+		delete capture_window;
+	}
+	twitch_capture = nullptr;
+	kick_capture = nullptr;
+	capture_window = nullptr;
+	capture_cef = nullptr;
+	captured_badges.clear();
 	for (AssetRequest *request : asset_requests) {
 		curl_multi_remove_handle(asset_multi, request->handle);
 		curl_easy_cleanup(request->handle);
