@@ -775,6 +775,8 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 {
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
 		shutting_down = true;
+		if (asset_timer)
+			asset_timer->stop();
 		stopCapture();
 		if (overlay_server)
 			overlay_server->close();
@@ -1421,9 +1423,13 @@ void obs_module_unload(void)
 #endif
 	capture_status = nullptr;
 	capture_state.clear();
-	if (asset_timer)
-		asset_timer->stop();
-	stopCapture();
+	// OBS_FRONTEND_EVENT_EXIT already closes browser widgets while Qt is alive.
+	// Do not inspect QPointers again after the frontend has torn them down.
+	if (!shutting_down) {
+		if (asset_timer)
+			asset_timer->stop();
+		stopCapture();
+	}
 	captured_badges.clear();
 	for (AssetRequest *request : asset_requests) {
 		curl_multi_remove_handle(asset_multi, request->handle);
@@ -1444,12 +1450,12 @@ void obs_module_unload(void)
 	twitch_badge_images = QJsonObject();
 	loaded_badge_catalogs.clear();
 	channel_badge_keys.clear();
-	if (overlay_server)
+	if (overlay_server && !shutting_down)
 		overlay_server->close();
 	overlay_server = nullptr;
 	overlay_clients.clear();
-	if (dock_registered) {
+	if (dock_registered && !shutting_down) {
 		obs_frontend_remove_dock("zosma-multichat");
-		dock_registered = false;
 	}
+	dock_registered = false;
 }
