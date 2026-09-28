@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStandardPaths>
 #include <atomic>
 #include <thread>
 
@@ -11,6 +12,7 @@ public:
 	explicit TikTokClient(QObject *parent = nullptr);
 	~TikTokClient() override;
 	void start(const QString &channel);
+	static QString logPath();
 
 signals:
 	void status(const QString &message);
