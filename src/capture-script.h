@@ -126,4 +126,3 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   else document.addEventListener('DOMContentLoaded', start, {once:true});
   setInterval(scan, 3000);
 })())SCRIPT";
-
