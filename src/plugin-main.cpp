@@ -92,6 +92,12 @@ static QCefCookieManager *tiktok_cookie_manager = nullptr;
 static QString capture_twitch_channel;
 static QString capture_kick_channel;
 static QString capture_tiktok_channel;
+static QString tiktok_page_path;
+static qint64 tiktok_last_status_ms = 0;
+static qint64 tiktok_last_reload_ms = 0;
+static int tiktok_visible_rows = 0;
+static bool tiktok_chat_surface = false;
+static bool tiktok_has_video = false;
 class CaptureWindow : public QWidget {
 public:
 	using QWidget::QWidget;
@@ -174,6 +180,7 @@ static void receiveCaptureTitle(const QString &title)
 		return;
 	}
 	if (platform == "TikTok" && payload.value("type").toString() == "chat") {
+		tiktok_visible_rows = qMax(1, tiktok_visible_rows);
 		logTikTokBrowser("Mensagem recebida pelo navegador oculto");
 		appendChat(platform, payload.value("name").toString(), payload.value("message").toString());
 		return;
@@ -186,6 +193,11 @@ static void receiveCaptureTitle(const QString &title)
 			capture_state.insert(platform,
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
+			tiktok_page_path = QUrl(url).path();
+			tiktok_last_status_ms = QDateTime::currentMSecsSinceEpoch();
+			tiktok_visible_rows = payload.value("rows").toInt();
+			tiktok_chat_surface = payload.value("chatSurface").toBool();
+			tiktok_has_video = payload.value("video").toBool();
 			logTikTokBrowser(
 				QString("Navegador oculto: %1 linhas, painel=%2, video=%3, login=%4, verificacao=%5, visibilidade=%6, caminho=%7")
 					.arg(payload.value("rows").toInt())
@@ -939,10 +951,16 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 			QObject::connect(
 				widget, &QCefWidget::urlChanged, capture_window, [platform](const QString &loaded) {
 					if (loaded != "about:blank") {
-						if (platform == "TikTok")
+						if (platform == "TikTok") {
+							tiktok_page_path = QUrl(loaded).path();
+							tiktok_last_reload_ms = QDateTime::currentMSecsSinceEpoch();
+							tiktok_visible_rows = 0;
+							tiktok_chat_surface = false;
+							tiktok_has_video = false;
 							logTikTokBrowser(
 								QString("Pagina carregada: %1%2")
 									.arg(QUrl(loaded).host(), QUrl(loaded).path()));
+						}
 						capture_state.insert(platform,
 								     loaded.startsWith("data:")
 									     ? "falha ao carregar página"
@@ -1359,6 +1377,24 @@ bool obs_module_load(void)
 		    (!capture_kick_channel.isEmpty() && !kick_capture) ||
 		    (!capture_tiktok_channel.isEmpty() && !tiktok_capture))
 			startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
+		if (!tiktok_capture || capture_tiktok_channel.isEmpty() || capture_tiktok_channel == "login" ||
+		    tiktok_page_path == "/login")
+			return;
+		const qint64 now = QDateTime::currentMSecsSinceEpoch();
+		const QString livePath = "/@" + capture_tiktok_channel + "/live";
+		if (now - tiktok_last_reload_ms < 60000)
+			return;
+		if (tiktok_page_path != livePath) {
+			logTikTokBrowser("Retornando automaticamente a LIVE da conta");
+			tiktok_capture->setURL(("https://www.tiktok.com" + livePath).toStdString());
+		} else if (now - tiktok_last_status_ms > 30000 || (!tiktok_has_video && !tiktok_chat_surface) ||
+			   (tiktok_visible_rows == 0 && (!tiktok_has_video || !tiktok_chat_surface))) {
+			logTikTokBrowser("Atualizando LIVE para procurar novo chat");
+			tiktok_capture->reloadPage();
+		} else {
+			return;
+		}
+		tiktok_last_reload_ms = now;
 	});
 	capture_retry->start();
 	startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
