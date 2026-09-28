@@ -150,7 +150,13 @@ static void receiveCaptureTitle(const QString &title)
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
 			logTikTokBrowser(
-				QString("Navegador oculto: %1 linhas visiveis").arg(payload.value("rows").toInt()));
+				QString("Navegador oculto: %1 linhas, painel=%2, video=%3, login=%4, verificacao=%5, visibilidade=%6")
+					.arg(payload.value("rows").toInt())
+					.arg(payload.value("chatSurface").toBool())
+					.arg(payload.value("video").toBool())
+					.arg(payload.value("login").toBool())
+					.arg(payload.value("verification").toBool())
+					.arg(payload.value("visibility").toString()));
 			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
 							       .arg(payload.value("rows").toInt()));
 		} else {
@@ -852,7 +858,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 	if (!capture_window) {
 		capture_window = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint);
 		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
-		capture_window->setGeometry(-3000, -3000, 1140, 600);
+		capture_window->setGeometry(-3000, -3000, 2000, 850);
 		capture_window->show();
 	}
 	auto update = [&](QPointer<QCefWidget> &widget, const QString &channel, const QString &url, int x,
@@ -893,7 +899,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 							 showCaptureState();
 						 }
 					 });
-			widget->setGeometry(x, 0, 380, 600);
+			widget->setGeometry(x, 0, platform == "TikTok" ? 1100 : 380, platform == "TikTok" ? 850 : 600);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
 			widget->show();
