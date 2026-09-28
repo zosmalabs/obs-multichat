@@ -111,20 +111,36 @@ bool obs_module_load(void)
 	retry->setSingleShot(true);
 	QString *channel = new QString();
 	QByteArray *buffer = new QByteArray();
-	QObject::connect(body, &QObject::destroyed, [channel, buffer]() {
+	bool *plainMode = new bool(!QSslSocket::supportsSsl());
+	QObject::connect(body, &QObject::destroyed, [channel, buffer, plainMode]() {
 		delete channel;
 		delete buffer;
+		delete plainMode;
 	});
-	QObject::connect(retry, &QTimer::timeout, socket, [socket, channel]() {
-		if (!channel->isEmpty() && socket->state() == QAbstractSocket::UnconnectedState)
+	auto connectChat = [socket, channel, plainMode, status]() {
+		if (channel->isEmpty() || socket->state() != QAbstractSocket::UnconnectedState)
+			return;
+		status->setText(QString::fromUtf8("Twitch: conectando a #%1...").arg(*channel));
+		if (*plainMode)
+			socket->connectToHost("irc.chat.twitch.tv", 6667);
+		else
 			socket->connectToHostEncrypted("irc.chat.twitch.tv", 6697);
-	});
-	QObject::connect(socket, &QSslSocket::encrypted, body, [socket, channel, status]() {
+	};
+	QObject::connect(retry, &QTimer::timeout, socket, connectChat);
+	auto joinChat = [socket, channel, status, plainMode]() {
 		socket->write("CAP REQ :twitch.tv/tags twitch.tv/commands\r\n");
 		socket->write("NICK justinfan" +
 			      QByteArray::number(QRandomGenerator::global()->bounded(100000, 999999)) + "\r\n");
 		socket->write("JOIN #" + channel->toUtf8() + "\r\n");
-		status->setText(QString::fromUtf8("Twitch: conectado a #%1. Aguardando mensagens.").arg(*channel));
+		status->setText(
+			*plainMode ? QString::fromUtf8("Twitch: conectado a #%1 sem TLS. Aguardando mensagens.")
+					     .arg(*channel)
+				   : QString::fromUtf8("Twitch: conectado a #%1. Aguardando mensagens.").arg(*channel));
+	};
+	QObject::connect(socket, &QSslSocket::encrypted, body, joinChat);
+	QObject::connect(socket, &QSslSocket::connected, body, [plainMode, joinChat]() {
+		if (*plainMode)
+			joinChat();
 	});
 	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer, messages]() {
 		buffer->append(socket->readAll());
@@ -172,43 +188,54 @@ bool obs_module_load(void)
 			retry->start(5000);
 		}
 	});
-	QObject::connect(socket, &QSslSocket::errorOccurred, body, [socket, status](QAbstractSocket::SocketError) {
-		status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
-	});
+	QObject::connect(socket, &QSslSocket::errorOccurred, body,
+			 [socket, status, plainMode, retry](QAbstractSocket::SocketError) {
+				 if (!*plainMode && (!QSslSocket::supportsSsl() ||
+						     socket->errorString().contains("TLS initialization failed",
+										    Qt::CaseInsensitive))) {
+					 *plainMode = true;
+					 status->setText(QString::fromUtf8(
+						 "Twitch: TLS indisponível. Tentando conexão de leitura sem TLS..."));
+					 socket->abort();
+					 retry->start(100);
+					 return;
+				 }
+				 status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
+			 });
 	auto *test = new QPushButton(QString::fromUtf8("Testar painel"), body);
 	layout->addWidget(test);
-	QObject::connect(save, &QPushButton::clicked, body, [inputs, status, socket, retry, channel, buffer]() {
-		constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
-		constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
-		QSettings settings("Zosma", "OBS Multichat");
-		for (int i = 0; i < 4; ++i) {
-			if (!validSource(i, inputs[i]->text())) {
-				status->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
+	QObject::connect(
+		save, &QPushButton::clicked, body, [inputs, status, socket, retry, channel, buffer, connectChat]() {
+			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
+			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
+			QSettings settings("Zosma", "OBS Multichat");
+			for (int i = 0; i < 4; ++i) {
+				if (!validSource(i, inputs[i]->text())) {
+					status->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
+					return;
+				}
+			}
+			for (int i = 0; i < 4; ++i)
+				settings.setValue(keys[i], inputs[i]->text().trimmed());
+			settings.sync();
+			if (settings.status() != QSettings::NoError) {
+				status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
 				return;
 			}
-		}
-		for (int i = 0; i < 4; ++i)
-			settings.setValue(keys[i], inputs[i]->text().trimmed());
-		settings.sync();
-		if (settings.status() != QSettings::NoError) {
-			status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
-			return;
-		}
-		*channel = twitchChannel(inputs[0]->text());
-		buffer->clear();
-		retry->stop();
-		socket->abort();
-		if (!channel->isEmpty()) {
-			status->setText(QString::fromUtf8("Twitch: conectando a #%1...").arg(*channel));
-			socket->connectToHostEncrypted("irc.chat.twitch.tv", 6697);
-		} else {
-			status->setText(
-				QString::fromUtf8("Fontes salvas. Preencha Twitch para iniciar a captura real."));
-		}
-	});
+			*channel = twitchChannel(inputs[0]->text());
+			buffer->clear();
+			retry->stop();
+			socket->abort();
+			if (!channel->isEmpty()) {
+				connectChat();
+			} else {
+				status->setText(QString::fromUtf8(
+					"Fontes salvas. Preencha Twitch para iniciar a captura real."));
+			}
+		});
 	*channel = twitchChannel(inputs[0]->text());
 	if (!channel->isEmpty())
-		socket->connectToHostEncrypted("irc.chat.twitch.tv", 6697);
+		connectChat();
 	QObject::connect(test, &QPushButton::clicked, body, [messages]() {
 		messages->append(QString::fromUtf8(
 			"<span style='color:#9146ff'>● Twitch</span> <b>exemplo:</b> Painel funcionando."));

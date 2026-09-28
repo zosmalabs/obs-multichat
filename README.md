@@ -13,6 +13,10 @@ diretamente por IRC/TLS, sem popup e sem login. O canal também reconecta
 automaticamente após uma queda de conexão. YouTube, Kick e TikTok ainda não
 recebem mensagens; a exibição na transmissão também está pendente.
 
+Quando o Qt no OBS não disponibiliza TLS, a conexão de leitura pública da
+Twitch usa o endpoint IRC sem TLS na porta 6667. O painel informa quando
+isso ocorre. Nenhuma senha ou token é enviada nessa conexão.
+
 ## Primeiro teste
 
 1. Em Actions, baixe o artefato windows-x64 do build mais recente.
