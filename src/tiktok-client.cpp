@@ -5,6 +5,11 @@
 #include "tiktok-client.h"
 
 #include <QCryptographicHash>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QStandardPaths>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -33,6 +38,7 @@ size_t writeBody(char *ptr, size_t size, size_t nmemb, void *userdata)
 struct HttpInfo {
 	long status = 0;
 	QString contentType;
+	CURLcode curlCode = CURLE_OK;
 };
 
 bool httpGet(const std::string &url, std::string &body, std::string *cookies = nullptr, HttpInfo *info = nullptr)
@@ -57,6 +63,7 @@ bool httpGet(const std::string &url, std::string &body, std::string *cookies = n
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	if (info) {
 		info->status = status;
+		info->curlCode = result;
 		char *contentType = nullptr;
 		curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &contentType);
 		info->contentType = QString::fromLatin1(contentType ? contentType : "");
@@ -295,6 +302,29 @@ bool signInitialUrl(const std::string &url, std::string &signedUrl, std::string 
 }
 } // namespace
 
+QString TikTokClient::logPath()
+{
+	return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/obs-multichat-tiktok.log";
+}
+
+static void logTikTok(const QString &event)
+{
+	const QString path = TikTokClient::logPath();
+	QDir().mkpath(QFileInfo(path).absolutePath());
+	QFile file(path);
+	if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+		return;
+	file.write((QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs) + " UTC " + event + "\n").toUtf8());
+}
+
+static QString httpSummary(const HttpInfo &info, size_t bytes)
+{
+	return QString("HTTP %1, curl %2, tipo %3, %4 bytes")
+		.arg(info.status).arg(static_cast<int>(info.curlCode))
+		.arg(info.contentType.isEmpty() ? QStringLiteral("ausente") : info.contentType)
+		.arg(bytes);
+}
+
 TikTokClient::TikTokClient(QObject *parent) : QObject(parent)
 {
 	curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -318,6 +348,13 @@ void TikTokClient::start(const QString &channel)
 	if (channel.isEmpty())
 		return;
 	cancelled = false;
+	{
+		QFile file(logPath());
+		QDir().mkpath(QFileInfo(logPath()).absolutePath());
+		if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+			file.write("OBS Multichat TikTok - diagnostico. Sem cookies, URLs assinadas ou mensagens.\\n");
+	}
+	logTikTok(QString("Inicio: canal @%1").arg(channel));
 	worker = std::thread([this, channel] {
 		auto report = [this](const QString &text) {
 			QMetaObject::invokeMethod(this, [this, text] { emit status(text); }, Qt::QueuedConnection);
@@ -331,7 +368,10 @@ void TikTokClient::start(const QString &channel)
 			report(QString::fromUtf8("TikTok: localizando LIVE de @%1...").arg(channel));
 			std::string html;
 			const std::string liveUrl = "https://www.tiktok.com/@" + channel.toStdString() + "/live";
-			if (!httpGet(liveUrl, html)) {
+			HttpInfo liveInfo;
+			const bool liveOk = httpGet(liveUrl, html, nullptr, &liveInfo);
+			logTikTok("Pagina LIVE: " + httpSummary(liveInfo, html.size()));
+			if (!liveOk) {
 				report(QString::fromUtf8(
 					"TikTok: não foi possível abrir a LIVE. Tentando novamente..."));
 			} else {
@@ -344,7 +384,10 @@ void TikTokClient::start(const QString &channel)
 						"https://www.tiktok.com/api-live/user/room/?aid=1988&app_name=tiktok_web"
 						"&device_platform=web&sourceType=54&uniqueId=" +
 						encoded(channel);
-					if (httpGet(apiUrl, fallback)) {
+					HttpInfo fallbackInfo;
+					const bool fallbackOk = httpGet(apiUrl, fallback, nullptr, &fallbackInfo);
+					logTikTok("API roomId: " + httpSummary(fallbackInfo, fallback.size()));
+					if (fallbackOk) {
 						QJsonParseError jsonError;
 						const QJsonDocument doc = QJsonDocument::fromJson(
 							QByteArray::fromStdString(fallback), &jsonError);
@@ -356,8 +399,10 @@ void TikTokClient::start(const QString &channel)
 					}
 				}
 				if (roomId.isEmpty()) {
+					logTikTok("roomId ausente");
 					report(QString::fromUtf8("TikTok: não foi possível obter o roomId da LIVE."));
 				} else {
+					logTikTok("roomId encontrado; iniciando polling");
 					report(QString::fromUtf8("TikTok: LIVE encontrada. Iniciando polling HTTP..."));
 					std::string cursor;
 					std::string internalExt;
@@ -373,15 +418,20 @@ void TikTokClient::start(const QString &channel)
 						std::string body;
 						HttpInfo info;
 						if (needsSigning && !signInitialUrl(rawUrl, url, cookies)) {
+							logTikTok("Assinatura falhou");
 							report(QString::fromUtf8(
 								"TikTok: falha ao preparar polling HTTP. Reconectando..."));
 							break;
 						}
-						if (!httpGet(url, body, &cookies, &info)) {
+						const bool fetchOk = httpGet(url, body, &cookies, &info);
+						logTikTok("Polling inicial: " + httpSummary(info, body.size()));
+						if (!fetchOk) {
 							if (!needsSigning && signInitialUrl(rawUrl, url, cookies) &&
 							    httpGet(url, body, &cookies, &info)) {
 								needsSigning = true;
+								logTikTok("Polling assinado: " + httpSummary(info, body.size()));
 							} else {
+								logTikTok("Polling recusado: " + httpSummary(info, body.size()));
 								report(QString::fromUtf8(
 									       "TikTok: polling recusado: %1. Reconectando...")
 									       .arg(describeResponse(body, info)));
@@ -389,6 +439,9 @@ void TikTokClient::start(const QString &channel)
 							}
 						}
 						const PollResponse response = parseResponse(body);
+						logTikTok(QString("Resposta: cursor=%1, extensao=%2, eventos=%3, tentativa_vazia=%4")
+								.arg(!response.cursor.empty()).arg(!response.internalExt.empty())
+								.arg(response.messages.size()).arg(emptyResponses + 1));
 						if (response.cursor.empty() && response.messages.empty()) {
 							++emptyResponses;
 							report(QString::fromUtf8(
