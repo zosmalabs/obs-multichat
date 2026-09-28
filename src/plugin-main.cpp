@@ -4,6 +4,7 @@
 #include <util/platform.h>
 
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QDesktopServices>
 #include <QDateTime>
 #include <QDir>
@@ -31,6 +32,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSpinBox>
@@ -86,9 +88,27 @@ static QPointer<QCefWidget> twitch_capture;
 static QPointer<QCefWidget> kick_capture;
 static QPointer<QCefWidget> tiktok_capture;
 static QCef *capture_cef = nullptr;
+static QCefCookieManager *tiktok_cookie_manager = nullptr;
 static QString capture_twitch_channel;
 static QString capture_kick_channel;
 static QString capture_tiktok_channel;
+class CaptureWindow : public QWidget {
+public:
+	using QWidget::QWidget;
+
+protected:
+	void closeEvent(QCloseEvent *event) override
+	{
+		if (tiktok_capture) {
+			tiktok_capture->setGeometry(760, 0, 1100, 850);
+			if (!capture_tiktok_channel.isEmpty())
+				tiktok_capture->setURL(
+					("https://www.tiktok.com/@" + capture_tiktok_channel + "/live").toStdString());
+		}
+		setGeometry(-3000, -3000, 2000, 850);
+		event->ignore();
+	}
+};
 static QHash<QString, QString> capture_state;
 struct AssetRequest {
 	CURL *handle = nullptr;
@@ -158,8 +178,12 @@ static void receiveCaptureTitle(const QString &title)
 					.arg(payload.value("verification").toBool())
 					.arg(payload.value("visibility").toString())
 					.arg(QUrl(url).path()));
-			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
-							       .arg(payload.value("rows").toInt()));
+			capture_state.insert(
+				platform,
+				QUrl(url).path() == "/login"
+					? QString::fromUtf8("login necessário: use o botão Abrir navegador do TikTok")
+					: QString::fromUtf8("chat aberto (%1 linhas visíveis)")
+						  .arg(payload.value("rows").toInt()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -857,7 +881,8 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 	if (!capture_cef->initialized())
 		return;
 	if (!capture_window) {
-		capture_window = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint);
+		capture_window = new CaptureWindow(nullptr, Qt::Tool | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+		capture_window->setWindowTitle(QString::fromUtf8("TikTok no Multichat · feche para ocultar"));
 		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
 		capture_window->setGeometry(-3000, -3000, 2000, 850);
 		capture_window->show();
@@ -879,7 +904,14 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 				QFile(TikTokClient::logPath()).open(QIODevice::WriteOnly | QIODevice::Truncate);
 				logTikTokBrowser("Iniciando captura em navegador oculto");
 			}
-			widget = capture_cef->create_widget(capture_window, url.toStdString());
+			if (platform == "TikTok" && !tiktok_cookie_manager) {
+				const QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
+						     "/obs-multichat-tiktok-cookies";
+				QDir().mkpath(path);
+				tiktok_cookie_manager = capture_cef->create_cookie_manager(path.toStdString(), true);
+			}
+			widget = capture_cef->create_widget(capture_window, url.toStdString(),
+							    platform == "TikTok" ? tiktok_cookie_manager : nullptr);
 			if (!widget) {
 				if (platform == "TikTok")
 					logTikTokBrowser("Falha ao criar navegador oculto");
@@ -1024,6 +1056,29 @@ bool obs_module_load(void)
 	capture_status = new QLabel(body);
 	capture_status->setWordWrap(true);
 	sources_layout->addWidget(capture_status);
+	auto *show_tiktok_browser = new QPushButton(QString::fromUtf8("Abrir navegador do TikTok para login"), body);
+	sources_layout->addWidget(show_tiktok_browser);
+	QObject::connect(show_tiktok_browser, &QPushButton::clicked, body, [status] {
+		if (capture_tiktok_channel.isEmpty()) {
+			status->setText(QString::fromUtf8("Adicione o @ do canal TikTok e salve as fontes primeiro."));
+			return;
+		}
+		startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
+		if (!capture_window || !tiktok_capture) {
+			status->setText(
+				QString::fromUtf8("O navegador do OBS ainda não está disponível. Tente novamente."));
+			return;
+		}
+		capture_window->setGeometry(100, 100, 1100, 850);
+		tiktok_capture->setGeometry(0, 0, 1100, 850);
+		tiktok_capture->raise();
+		capture_window->setAttribute(Qt::WA_ShowWithoutActivating, false);
+		capture_window->show();
+		capture_window->raise();
+		capture_window->activateWindow();
+		status->setText(
+			QString::fromUtf8("Faça login no TikTok e feche essa janela para continuar a captura oculta."));
+	});
 	auto *tiktok_log = new QLabel(QString::fromUtf8("Log do TikTok: %1").arg(TikTokClient::logPath()), body);
 	tiktok_log->setWordWrap(true);
 	tiktok_log->setTextInteractionFlags(Qt::TextSelectableByMouse);
