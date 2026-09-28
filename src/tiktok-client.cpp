@@ -30,7 +30,12 @@ size_t writeBody(char *ptr, size_t size, size_t nmemb, void *userdata)
 	return size * nmemb;
 }
 
-bool httpGet(const std::string &url, std::string &body, std::string *cookies = nullptr)
+struct HttpInfo {
+	long status = 0;
+	QString contentType;
+};
+
+bool httpGet(const std::string &url, std::string &body, std::string *cookies = nullptr, HttpInfo *info = nullptr)
 {
 	CURL *curl = curl_easy_init();
 	if (!curl)
@@ -50,8 +55,34 @@ bool httpGet(const std::string &url, std::string &body, std::string *cookies = n
 	const CURLcode result = curl_easy_perform(curl);
 	long status = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+	if (info) {
+		info->status = status;
+		char *contentType = nullptr;
+		curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &contentType);
+		info->contentType = QString::fromLatin1(contentType ? contentType : "");
+	}
 	curl_easy_cleanup(curl);
 	return result == CURLE_OK && status >= 200 && status < 300;
+}
+
+QString describeResponse(const std::string &body, const HttpInfo &info)
+{
+	const QByteArray bytes(body.data(), static_cast<qsizetype>(body.size()));
+	const QJsonDocument json = QJsonDocument::fromJson(bytes);
+	if (json.isObject()) {
+		const QJsonObject object = json.object();
+		const QString code = object.value("statusCode").toVariant().toString();
+		const QString message = object.value("message").toString().left(100);
+		return QString::fromUtf8("JSON HTTP %1 (código %2, %3)")
+			.arg(info.status)
+			.arg(code.isEmpty() ? "?" : code, message.isEmpty() ? "sem mensagem" : message);
+	}
+	if (bytes.trimmed().startsWith('<'))
+		return QString::fromUtf8("HTML HTTP %1 (%2)").arg(info.status).arg(info.contentType);
+	return QString::fromUtf8("HTTP %1 (%2, %3 bytes)")
+		.arg(info.status)
+		.arg(info.contentType.isEmpty() ? "tipo ausente" : info.contentType)
+		.arg(bytes.size());
 }
 
 std::string encoded(const QString &value)
@@ -333,33 +364,45 @@ void TikTokClient::start(const QString &channel)
 					std::string cookies;
 					bool initial = true;
 					bool needsSigning = false;
+					int emptyResponses = 0;
 					QSet<QByteArray> seen;
 					QList<QByteArray> recent;
 					while (!cancelled) {
 						const std::string rawUrl = baseFetchUrl(roomId, cursor, internalExt);
 						std::string url = rawUrl;
 						std::string body;
+						HttpInfo info;
 						if (needsSigning && !signInitialUrl(rawUrl, url, cookies)) {
 							report(QString::fromUtf8(
 								"TikTok: falha ao preparar polling HTTP. Reconectando..."));
 							break;
 						}
-						if (!httpGet(url, body, &cookies)) {
+						if (!httpGet(url, body, &cookies, &info)) {
 							if (!needsSigning && signInitialUrl(rawUrl, url, cookies) &&
-							    httpGet(url, body, &cookies)) {
+							    httpGet(url, body, &cookies, &info)) {
 								needsSigning = true;
 							} else {
 								report(QString::fromUtf8(
-									"TikTok: polling HTTP recusado. Reconectando..."));
+									       "TikTok: polling recusado: %1. Reconectando...")
+									       .arg(describeResponse(body, info)));
 								break;
 							}
 						}
 						const PollResponse response = parseResponse(body);
 						if (response.cursor.empty() && response.messages.empty()) {
+							++emptyResponses;
 							report(QString::fromUtf8(
-								"TikTok: resposta HTTP sem chat ou cursor. Reconectando..."));
-							break;
+								       "TikTok: resposta sem cursor/chat (%1; tentativa %2/5)")
+								       .arg(describeResponse(body, info))
+								       .arg(emptyResponses));
+							if (emptyResponses >= 5)
+								break;
+							for (int i = 0; i < 20 && !cancelled; ++i)
+								std::this_thread::sleep_for(
+									std::chrono::milliseconds(100));
+							continue;
 						}
+						emptyResponses = 0;
 						if (!response.cursor.empty())
 							cursor = response.cursor;
 						if (!response.internalExt.empty())
