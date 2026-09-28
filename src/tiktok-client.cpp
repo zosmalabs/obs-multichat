@@ -213,11 +213,11 @@ PollResponse parseResponse(const std::string &data)
 QString roomIdFromHtml(const std::string &html)
 {
 	const QString page = QString::fromUtf8(html);
-\tfor (const QString &pattern : {QStringLiteral("\\\"roomId\\\":\\\"?(\\\\d+)\\\"?"),\n\t\t\t\t       QStringLiteral("\\\"room_id\\\":\\\"?(\\\\d+)\\\"?")}) {\n	const QRegularExpressionMatch match = QRegularExpression(pattern).match(page);
-		if (match.hasMatch())
-			return match.captured(1);
-	}
-	return {};
+	QRegularExpressionMatch match = QRegularExpression(QStringLiteral("\\\"roomId\\\":\\\"?(\\\\d+)\\\"?")).match(page);
+	if (match.hasMatch())
+		return match.captured(1);
+	match = QRegularExpression(QStringLiteral("\\\"room_id\\\":\\\"?(\\\\d+)\\\"?")).match(page);
+	return match.hasMatch() ? match.captured(1) : QString();
 }
 
 std::string baseFetchUrl(const QString &roomId, const std::string &cursor, const std::string &internalExt)
