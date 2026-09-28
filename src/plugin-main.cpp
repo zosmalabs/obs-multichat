@@ -289,9 +289,9 @@ static void queueAsset(const QString &url, bool catalog = false, const QString &
 static void processBadgeCatalog(const QByteArray &bytes, const QString &room_id)
 {
 	const QJsonArray sets = QJsonDocument::fromJson(bytes).array();
-	for (const QJsonValue &set_value : sets) {
+	for (const QJsonValue set_value : sets) {
 		const QJsonObject set = set_value.toObject();
-		for (const QJsonValue &version_value : set.value("versions").toArray()) {
+		for (const QJsonValue version_value : set.value("versions").toArray()) {
 			const QJsonObject version = version_value.toObject();
 			const QString image = version.value("image_url_2x").toString();
 			const QString key = set.value("id").toString() + "/" + version.value("id").toString();
