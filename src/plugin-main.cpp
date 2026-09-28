@@ -93,9 +93,14 @@ static QPointer<QSoundEffect> notification_sound;
 static bool notification_enabled = false;
 class CaptureWindow : public QWidget {
 public:
- using QWidget::QWidget;
+	using QWidget::QWidget;
+
 protected:
- void closeEvent(QCloseEvent *event) override { setGeometry(-3000, -3000, 800, 600); event->ignore(); }
+	void closeEvent(QCloseEvent *event) override
+	{
+		setGeometry(-3000, -3000, 800, 600);
+		event->ignore();
+	}
 };
 static QHash<QString, QString> capture_state;
 struct AssetRequest {
@@ -118,9 +123,10 @@ static void startCapture(const QString &twitch, const QString &kick);
 
 static void showCaptureState()
 {
- if (capture_status)
-  capture_status->setText(QString::fromUtf8("Captura · Twitch: %1 · Kick: %2")
-    .arg(capture_state.value("Twitch", "aguardando"), capture_state.value("Kick", "aguardando")));
+	if (capture_status)
+		capture_status->setText(QString::fromUtf8("Captura · Twitch: %1 · Kick: %2")
+						.arg(capture_state.value("Twitch", "aguardando"),
+						     capture_state.value("Kick", "aguardando")));
 }
 
 static void receiveCaptureTitle(const QString &title)
@@ -136,7 +142,8 @@ static void receiveCaptureTitle(const QString &title)
 		const QString url = payload.value("url").toString();
 		if (QUrl(url).host() != "kick.com" && QUrl(url).host() != "www.kick.com" &&
 		    QUrl(url).host() != "www.twitch.tv" && QUrl(url).host() != "twitch.tv") {
-			capture_state.insert(platform, QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
+			capture_state.insert(platform,
+					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -327,8 +334,7 @@ static QImage platformIcon(const QString &platform)
 	font.setPixelSize(23);
 	painter.setFont(font);
 	painter.drawText(icon.rect(), Qt::AlignCenter,
-			 platform == "YouTube"  ? QString::fromUtf8("▶")
-						: platform.left(1));
+			 platform == "YouTube" ? QString::fromUtf8("▶") : platform.left(1));
 	return icon;
 }
 
@@ -488,9 +494,7 @@ static void renderPanel()
 	QString html = "<html><body style='color:white;font-family:Arial;font-size:13px'>";
 	for (const QJsonObject &entry : panel_history) {
 		const QString platform = entry.value("platform").toString();
-		const QString color = platform == "Twitch"   ? "#9146ff"
-				      : platform == "Kick"   ? "#53fc18"
-							     : "#ff0033";
+		const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18" : "#ff0033";
 		const QUrl resource(QString("platform:%1").arg(platform.toLower()));
 		panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
 		html += QString("<p style='margin:4px 0'><img src='%1' width='18' height='18'> ")
@@ -793,8 +797,7 @@ static bool validSource(int platform, const QString &value)
 
 static void startCapture(const QString &twitch, const QString &kick)
 {
-	if (shutting_down || !overlay_server ||
-	    (!capture_window && twitch.isEmpty() && kick.isEmpty()))
+	if (shutting_down || !overlay_server || (!capture_window && twitch.isEmpty() && kick.isEmpty()))
 		return;
 	if (!capture_cef) {
 		obs_module_t *module = obs_get_module("obs-browser");
@@ -836,16 +839,16 @@ static void startCapture(const QString &twitch, const QString &kick)
 				return;
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
 					 [](const QString &title) { receiveCaptureTitle(title); });
-			QObject::connect(
-				widget, &QCefWidget::urlChanged, capture_window, [platform](const QString &loaded) {
-					if (loaded != "about:blank") {
-						capture_state.insert(platform,
-								     loaded.startsWith("data:")
-									     ? "falha ao carregar página"
-									     : "página aberta, aguardando chat");
-						showCaptureState();
-					}
-				});
+			QObject::connect(widget, &QCefWidget::urlChanged, capture_window,
+					 [platform](const QString &loaded) {
+						 if (loaded != "about:blank") {
+							 capture_state.insert(
+								 platform, loaded.startsWith("data:")
+										   ? "falha ao carregar página"
+										   : "página aberta, aguardando chat");
+							 showCaptureState();
+						 }
+					 });
 			widget->setGeometry(x, 0, 380, 600);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
@@ -863,7 +866,6 @@ static void startCapture(const QString &twitch, const QString &kick)
 		capture_kick_channel = kick;
 		update(kick_capture, kick, "https://kick.com/popout/" + kick + "/chat", 380, "Kick", capture_script);
 	}
-
 }
 
 bool obs_module_load(void)
@@ -1067,22 +1069,29 @@ bool obs_module_load(void)
 		const QByteArray id = QByteArray::fromBase64(alert_device->currentData().toString().toLatin1());
 		QAudioDevice device = QMediaDevices::defaultAudioOutput();
 		for (const QAudioDevice &output : QMediaDevices::audioOutputs())
-			if (!id.isEmpty() && output.id() == id) { device = output; break; }
+			if (!id.isEmpty() && output.id() == id) {
+				device = output;
+				break;
+			}
 		if (!device.isNull())
 			notification_sound->setAudioDevice(device);
 	};
 	apply_device();
-	QObject::connect(alert_device, qOverload<int>(&QComboBox::currentIndexChanged), body,
-		[alert_device, apply_device](int) {
+	QObject::connect(
+		alert_device, qOverload<int>(&QComboBox::currentIndexChanged), body, [alert_device, apply_device](int) {
 			QSettings("Zosma", "OBS Multichat").setValue("notification_device", alert_device->currentData());
 			apply_device();
 		});
 	QObject::connect(new QMediaDevices(body), &QMediaDevices::audioOutputsChanged, body,
-		[populate_devices, apply_device]() { populate_devices(); apply_device(); });
+			 [populate_devices, apply_device]() {
+				 populate_devices();
+				 apply_device();
+			 });
 	auto *preview_sound = new QPushButton(QString::fromUtf8("Testar som"), alert_group);
 	alert_form->addRow(preview_sound);
 	QObject::connect(preview_sound, &QPushButton::clicked, body, []() {
-		if (notification_sound) notification_sound->play();
+		if (notification_sound)
+			notification_sound->play();
 	});
 	appearance_layout->addWidget(alert_group);
 
@@ -1219,41 +1228,40 @@ bool obs_module_load(void)
 				 }
 				 status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
 			 });
-	QObject::connect(save, &QPushButton::clicked, body,
-			 [inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
-				 constexpr const char *names[] = {"Twitch", "Kick", "YouTube"};
-				 constexpr const char *keys[] = {"twitch", "kick", "youtube"};
-				 QSettings settings("Zosma", "OBS Multichat");
-				 for (int i = 0; i < 3; ++i) {
-					 if (!validSource(i, inputs[i]->text())) {
-						 status->setText(
-							 QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
-						 return;
-					 }
-				 }
-				 for (int i = 0; i < 3; ++i)
-					 settings.setValue(keys[i], inputs[i]->text().trimmed());
-				 settings.sync();
-				 if (settings.status() != QSettings::NoError) {
-					 status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
-					 return;
-				 }
-				 *channel = twitchChannel(inputs[0]->text());
-				 const QString kick_name = kickChannel(inputs[1]->text());
-				 kick->start(kick_name);
-				 startCapture(*channel, kick_name);
-				 youtube->start(youtubeVideoId(inputs[2]->text()));
-				 buffer->clear();
-				 retry->stop();
-				 socket->abort();
-				 if (!channel->isEmpty()) {
-					 connectChat();
-				 } else if (inputs[1]->text().trimmed().isEmpty() &&
-					    inputs[2]->text().trimmed().isEmpty()) {
-					 status->setText(QString::fromUtf8(
-						 "Fontes salvas. Preencha Twitch para iniciar a captura real."));
-				 }
-			 });
+	QObject::connect(
+		save, &QPushButton::clicked, body,
+		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
+			constexpr const char *names[] = {"Twitch", "Kick", "YouTube"};
+			constexpr const char *keys[] = {"twitch", "kick", "youtube"};
+			QSettings settings("Zosma", "OBS Multichat");
+			for (int i = 0; i < 3; ++i) {
+				if (!validSource(i, inputs[i]->text())) {
+					status->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
+					return;
+				}
+			}
+			for (int i = 0; i < 3; ++i)
+				settings.setValue(keys[i], inputs[i]->text().trimmed());
+			settings.sync();
+			if (settings.status() != QSettings::NoError) {
+				status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
+				return;
+			}
+			*channel = twitchChannel(inputs[0]->text());
+			const QString kick_name = kickChannel(inputs[1]->text());
+			kick->start(kick_name);
+			startCapture(*channel, kick_name);
+			youtube->start(youtubeVideoId(inputs[2]->text()));
+			buffer->clear();
+			retry->stop();
+			socket->abort();
+			if (!channel->isEmpty()) {
+				connectChat();
+			} else if (inputs[1]->text().trimmed().isEmpty() && inputs[2]->text().trimmed().isEmpty()) {
+				status->setText(QString::fromUtf8(
+					"Fontes salvas. Preencha Twitch para iniciar a captura real."));
+			}
+		});
 	*channel = twitchChannel(inputs[0]->text());
 	capture_twitch_channel = *channel;
 	capture_kick_channel = kickChannel(inputs[1]->text());
