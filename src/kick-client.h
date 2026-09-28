@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QJsonArray>
 #include <QString>
 #include <atomic>
 #include <thread>
@@ -13,7 +14,7 @@ public:
 	void start(const QString &channel);
 signals:
 	void status(const QString &message);
-	void message(const QString &name, const QString &text);
+	void message(const QString &name, const QString &text, const QJsonArray &badges);
 
 private:
 	void stop();

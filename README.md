@@ -26,7 +26,12 @@ da cor de fundo do painel de mensagens. As escolhas ficam salvas e atualizam
 a fonte de navegador em tempo real.
 O OBS salva a fonte nas cenas e o plugin atualiza seu endereço local ao reiniciar.
 A fonte de texto anterior Zosma Multichat é removida na primeira ativação
-da fonte de navegador.
+da fonte de navegador. O painel usa apenas o símbolo da plataforma em cada
+mensagem. As badges da Twitch são identificadas pelas tags IRC e consultadas
+no catálogo público da Twitch, incluindo as específicas do canal. Emotes da
+Twitch e da Kick aparecem como imagens na transmissão e como imagem estática
+no painel quando carregam. Badges da Kick são mostradas pelo nome; quando o
+evento inclui uma URL de imagem válida, essa imagem é usada.
 
 Quando o Qt no OBS não disponibiliza TLS, a conexão de leitura pública da
 Twitch usa o endpoint IRC sem TLS na porta 6667. O painel informa quando

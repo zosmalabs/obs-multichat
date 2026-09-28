@@ -9,10 +9,19 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMap>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QHostAddress>
+#include <QHash>
+#include <QImage>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QPainter>
+#include <QScrollBar>
+#include <QSet>
+#include <QTextDocument>
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
@@ -48,6 +57,17 @@ static bool shutting_down = false;
 static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
+static QPointer<QTextBrowser> panel_view;
+static QNetworkAccessManager *image_network = nullptr;
+static QList<QJsonObject> panel_history;
+static QHash<QString, QImage> image_cache;
+static QSet<QString> pending_images;
+static QSet<QString> failed_images;
+static QJsonObject twitch_badge_images;
+static QSet<QString> loaded_badge_catalogs;
+static QSet<QString> channel_badge_keys;
+
+static void renderPanel();
 
 static QString cssColor(const QColor &color)
 {
@@ -63,6 +83,7 @@ static QByteArray overlayPayload()
 	QJsonObject payload;
 	payload.insert("limit", overlay_max_lines);
 	payload.insert("messages", overlay_messages);
+	payload.insert("badgeImages", twitch_badge_images);
 	payload.insert("fontSize", overlay_font_size);
 	payload.insert("nickColors", overlay_nick_colors);
 	payload.insert("cards", overlay_cards);
@@ -76,6 +97,9 @@ html,body{margin:0;overflow:hidden;font:32px Arial,sans-serif;color:#fff;backgro
 .line{overflow-wrap:anywhere;text-shadow:0 2px 4px #0009,0 0 2px #0008;line-height:1.3}
 .cards .line{background:#111c;border-left:4px solid var(--color);border-radius:8px;padding:7px 12px;box-shadow:0 2px 10px #0003}
 .badge{display:inline-grid;place-items:center;width:1.45em;height:1.45em;border-radius:6px;vertical-align:middle;margin-right:8px;background:var(--color);color:#fff;font:bold .68em Arial,sans-serif;text-shadow:0 1px 2px #0008}
+.role{display:inline-block;background:#ffffff26;border-radius:4px;font:.55em Arial,sans-serif;padding:2px 5px;vertical-align:middle;margin-right:4px}
+.role-image{width:1em;height:1em;object-fit:contain;vertical-align:middle;margin-right:4px}
+.emote{height:1.15em;vertical-align:middle;object-fit:contain}
 .nick{color:var(--nick-color);font-weight:700}.message{white-space:pre-wrap}
 </style><div id="chat"></div><script>
 const colors={Twitch:'#9146ff',Kick:'#53fc18',YouTube:'#ff0033',TikTok:'#ffffff'};
@@ -87,8 +111,19 @@ function draw(data){document.body.style.background=data.background;document.body
  row.style.setProperty('--nick-color',data.nickColors?(colors[item.platform]||'#fff'):'#fff');
  const badge=document.createElement('span');badge.className='badge';badge.textContent=badges[item.platform]||'?';badge.title=item.platform;
  const nick=document.createElement('span');nick.className='nick';nick.textContent=item.name+': ';
- const message=document.createElement('span');message.className='message';message.textContent=item.message;
- row.append(badge,nick,message);chat.append(row);
+ row.append(badge);
+ for(const role of item.badges||[]){const url=role.image||data.badgeImages[role.key];
+  if(url){const img=document.createElement('img');img.className='role-image';img.src=url;img.title=role.label;row.append(img)}
+  else {const tag=document.createElement('span');tag.className='role';tag.textContent=role.label;row.append(tag)}
+ }
+ row.append(nick);
+ const message=document.createElement('span');message.className='message';let offset=0;
+ for(const emote of item.emotes||[]){if(emote.start<offset||emote.end>item.message.length)continue;
+  message.append(document.createTextNode(item.message.slice(offset,emote.start)));
+  const img=document.createElement('img');img.className='emote';img.src=emote.url;img.alt=emote.label;img.title=emote.label;
+  img.onerror=()=>img.replaceWith(document.createTextNode(emote.label));message.append(img);offset=emote.end;
+ }
+ message.append(document.createTextNode(item.message.slice(offset)));row.append(message);chat.append(row);
 }}
 const events=new EventSource('/events');events.onmessage=e=>draw(JSON.parse(e.data));
 </script></html>)HTML";
@@ -154,6 +189,155 @@ static void refreshOverlay()
 	}
 }
 
+static QImage platformIcon(const QString &platform)
+{
+	QImage icon(32, 32, QImage::Format_ARGB32_Premultiplied);
+	icon.fill(Qt::transparent);
+	QPainter painter(&icon);
+	painter.setRenderHint(QPainter::Antialiasing);
+	const QColor color = platform == "Twitch"    ? QColor("#9146ff")
+			     : platform == "Kick"    ? QColor("#53b824")
+			     : platform == "YouTube" ? QColor("#ff0033")
+						     : QColor("#555555");
+	painter.setPen(Qt::NoPen);
+	painter.setBrush(color);
+	painter.drawRoundedRect(QRectF(1, 1, 30, 30), 6, 6);
+	painter.setPen(Qt::white);
+	QFont font = painter.font();
+	font.setBold(true);
+	font.setPixelSize(23);
+	painter.setFont(font);
+	painter.drawText(icon.rect(), Qt::AlignCenter,
+			 platform == "YouTube" ? QString::fromUtf8("▶") : platform.left(1));
+	return icon;
+}
+
+static void requestChatImage(const QString &url)
+{
+	if (!image_network || image_cache.contains(url) || pending_images.contains(url) ||
+	    failed_images.contains(url) || image_cache.size() + pending_images.size() >= 200)
+		return;
+	const QUrl parsed(url);
+	if (parsed.scheme() != "https" || (parsed.host() != "static-cdn.jtvnw.net" &&
+					   parsed.host() != "files.kick.com" && parsed.host() != "cdn.kick.com"))
+		return;
+	pending_images.insert(url);
+	QNetworkRequest request(parsed);
+	request.setTransferTimeout(7000);
+	QNetworkReply *reply = image_network->get(request);
+	QObject::connect(reply, &QNetworkReply::finished, reply, [reply, url]() {
+		pending_images.remove(url);
+		const QByteArray bytes = reply->readAll();
+		QImage image;
+		if (reply->error() == QNetworkReply::NoError && bytes.size() <= 1024 * 1024 &&
+		    image.loadFromData(bytes)) {
+			image_cache.insert(url, image);
+			renderPanel();
+		} else
+			failed_images.insert(url);
+		reply->deleteLater();
+	});
+}
+
+static QString panelImage(const QString &url, const QString &label, int height)
+{
+	if (!image_cache.contains(url)) {
+		requestChatImage(url);
+		return label.toHtmlEscaped();
+	}
+	const QUrl resource(QString("asset:%1").arg(qHash(url)));
+	panel_view->document()->addResource(QTextDocument::ImageResource, resource, image_cache.value(url));
+	return QString("<img src='%1' height='%2' alt='%3'>")
+		.arg(resource.toString(), QString::number(height), label.toHtmlEscaped());
+}
+
+static QString panelMessageHtml(const QJsonObject &entry)
+{
+	const QString message = entry.value("message").toString();
+	QString result;
+	int offset = 0;
+	for (const QJsonValue value : entry.value("emotes").toArray()) {
+		const QJsonObject emote = value.toObject();
+		const int start = emote.value("start").toInt(-1);
+		const int end = emote.value("end").toInt(-1);
+		if (start < offset || end <= start || end > message.size())
+			continue;
+		result += message.mid(offset, start - offset).toHtmlEscaped();
+		result += panelImage(emote.value("url").toString(), emote.value("label").toString(), 23);
+		offset = end;
+	}
+	return result + message.mid(offset).toHtmlEscaped();
+}
+
+static void renderPanel()
+{
+	if (!panel_view)
+		return;
+	auto *scroll = panel_view->verticalScrollBar();
+	const bool at_bottom = scroll->value() >= scroll->maximum() - 24;
+	const int previous = scroll->value();
+	QString html = "<html><body style='color:white;font-family:Arial;font-size:13px'>";
+	for (const QJsonObject &entry : panel_history) {
+		const QString platform = entry.value("platform").toString();
+		const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18" : "#ff0033";
+		const QUrl resource(QString("platform:%1").arg(platform.toLower()));
+		panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
+		html += QString("<p style='margin:4px 0'><img src='%1' width='18' height='18'> ")
+				.arg(resource.toString());
+		for (const QJsonValue value : entry.value("badges").toArray()) {
+			const QJsonObject badge = value.toObject();
+			const QString label = badge.value("label").toString();
+			QString url = badge.value("image").toString();
+			if (url.isEmpty())
+				url = twitch_badge_images.value(badge.value("key").toString()).toString();
+			if (!url.isEmpty())
+				html += panelImage(url, label, 17) + " ";
+			else
+				html += QString("<span style='color:#cccccc'>[%1]</span> ").arg(label.toHtmlEscaped());
+		}
+		html += QString("<b style='color:%1'>%2:</b> %3</p>")
+				.arg(color, entry.value("name").toString().toHtmlEscaped(), panelMessageHtml(entry));
+	}
+	panel_view->setHtml(html + "</body></html>");
+	scroll->setValue(at_bottom ? scroll->maximum() : previous);
+}
+
+static void requestTwitchBadges(const QString &room_id)
+{
+	if (!image_network || loaded_badge_catalogs.contains(room_id) ||
+	    (!room_id.isEmpty() && !QRegularExpression("^[0-9]+$").match(room_id).hasMatch()))
+		return;
+	loaded_badge_catalogs.insert(room_id);
+	const QUrl url("https://badges.twitch.tv/v1/badges/" +
+		       (room_id.isEmpty() ? QString("global") : QString("channels/") + room_id) + "/display");
+	QNetworkRequest request(url);
+	request.setTransferTimeout(8000);
+	QNetworkReply *reply = image_network->get(request);
+	QObject::connect(reply, &QNetworkReply::finished, reply, [reply, room_id]() {
+		if (reply->error() == QNetworkReply::NoError) {
+			const QJsonObject sets =
+				QJsonDocument::fromJson(reply->readAll()).object().value("badge_sets").toObject();
+			for (auto set = sets.begin(); set != sets.end(); ++set) {
+				const QJsonObject versions = set.value().toObject().value("versions").toObject();
+				for (auto version = versions.begin(); version != versions.end(); ++version) {
+					const QJsonObject details = version.value().toObject();
+					const QString image = details.value("image_url_2x").toString();
+					const QString key = set.key() + "/" + version.key();
+					if (QUrl(image).host() == "static-cdn.jtvnw.net" &&
+					    (!room_id.isEmpty() || !channel_badge_keys.contains(key))) {
+						twitch_badge_images.insert(key, image);
+						if (!room_id.isEmpty())
+							channel_badge_keys.insert(key);
+					}
+				}
+			}
+			renderPanel();
+			refreshOverlay();
+		}
+		reply->deleteLater();
+	});
+}
+
 static bool attachOverlay()
 {
 	if (shutting_down || !overlay_server || !overlay_server->isListening())
@@ -199,17 +383,75 @@ static bool attachOverlay()
 	return attached;
 }
 
-static void updateOverlay(const QString &platform, const QString &name, const QString &message)
+static void appendChat(const QString &platform, const QString &name, const QString &message,
+		       const QJsonArray &badges = {}, const QJsonArray &emotes = {})
 {
 	QJsonObject entry;
 	entry.insert("platform", platform);
 	entry.insert("name", name.left(80));
 	entry.insert("message", message.left(500));
+	entry.insert("badges", badges);
+	entry.insert("emotes", emotes);
 	overlay_messages.append(entry);
 	while (overlay_messages.size() > 50)
 		overlay_messages.removeAt(0);
+	panel_history.append(entry);
+	while (panel_history.size() > 100)
+		panel_history.removeFirst();
+	renderPanel();
 	if (overlay_checkbox && overlay_checkbox->isChecked())
 		refreshOverlay();
+}
+
+static QJsonArray kickEmotes(const QString &message)
+{
+	QJsonArray result;
+	QRegularExpression pattern("\\[emote:([0-9]+):([^\\]]+)\\]");
+	auto matches = pattern.globalMatch(message);
+	while (matches.hasNext()) {
+		const auto match = matches.next();
+		QJsonObject emote;
+		emote.insert("start", match.capturedStart());
+		emote.insert("end", match.capturedEnd());
+		emote.insert("label", match.captured(2));
+		emote.insert("url", "https://files.kick.com/emotes/" + match.captured(1) + "/fullsize");
+		result.append(emote);
+	}
+	return result;
+}
+
+static QJsonArray twitchEmotes(const QString &message, const QByteArray &tag)
+{
+	QMap<int, QJsonObject> positions;
+	for (const QByteArray &group : tag.split('/')) {
+		const int separator = group.indexOf(':');
+		if (separator < 1)
+			continue;
+		const QByteArray id = group.left(separator);
+		if (!QRegularExpression("^[0-9]+$").match(QString::fromLatin1(id)).hasMatch())
+			continue;
+		for (const QByteArray &range : group.mid(separator + 1).split(',')) {
+			const QList<QByteArray> ends = range.split('-');
+			if (ends.size() != 2)
+				continue;
+			bool ok_start = false, ok_end = false;
+			const int start = ends[0].toInt(&ok_start);
+			const int end = ends[1].toInt(&ok_end) + 1;
+			if (!ok_start || !ok_end || start < 0 || end > message.size() || end <= start)
+				continue;
+			QJsonObject emote;
+			emote.insert("start", start);
+			emote.insert("end", end);
+			emote.insert("label", message.mid(start, end - start));
+			emote.insert("url", "https://static-cdn.jtvnw.net/emoticons/v2/" + QString::fromLatin1(id) +
+						    "/default/dark/2.0");
+			positions.insert(start, emote);
+		}
+	}
+	QJsonArray result;
+	for (const QJsonObject &emote : positions)
+		result.append(emote);
+	return result;
 }
 
 static void frontendEvent(enum obs_frontend_event event, void *)
@@ -383,6 +625,9 @@ bool obs_module_load(void)
 	auto *save = new QPushButton(QString::fromUtf8("Salvar fontes"), body);
 	layout->addWidget(save);
 	auto *messages = new QTextBrowser(body);
+	panel_view = messages;
+	image_network = new QNetworkAccessManager(body);
+	requestTwitchBadges({});
 	messages->setOpenExternalLinks(false);
 	messages->setPlaceholderText(
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
@@ -455,18 +700,27 @@ bool obs_module_load(void)
 	QObject::connect(youtube, &YouTubeClient::status, body,
 			 [status](const QString &message) { status->setText(message); });
 	QObject::connect(youtube, &YouTubeClient::message, body,
-			 [messages](const QString &name, const QString &message) {
-				 messages->append(QString("<span style='color:#ff0033'>● YouTube</span> <b>%1:</b> %2")
-							  .arg(name.toHtmlEscaped(), message.toHtmlEscaped()));
-				 updateOverlay("YouTube", name, message);
-			 });
+			 [](const QString &name, const QString &message) { appendChat("YouTube", name, message); });
 	QObject::connect(kick, &KickClient::status, body,
 			 [status](const QString &message) { status->setText(message); });
-	QObject::connect(kick, &KickClient::message, body, [messages](const QString &name, const QString &message) {
-		messages->append(QString("<span style='color:#53fc18'>● Kick</span> <b>%1:</b> %2")
-					 .arg(name.toHtmlEscaped(), message.toHtmlEscaped()));
-		updateOverlay("Kick", name, message);
-	});
+	QObject::connect(kick, &KickClient::message, body,
+			 [](const QString &name, const QString &message, const QJsonArray &raw_badges) {
+				 QJsonArray badges;
+				 for (const QJsonValue value : raw_badges) {
+					 const QJsonObject badge = value.toObject();
+					 const QString label =
+						 badge.value("text").toString(badge.value("type").toString());
+					 if (label.isEmpty())
+						 continue;
+					 QJsonObject display{{"label", label.left(40)}};
+					 const QString url = badge.value("image_url").toString();
+					 if (QUrl(url).scheme() == "https" && (QUrl(url).host() == "files.kick.com" ||
+									       QUrl(url).host() == "cdn.kick.com"))
+						 display.insert("image", url);
+					 badges.append(display);
+				 }
+				 appendChat("Kick", name, message, badges, kickEmotes(message));
+			 });
 	auto *socket = new QSslSocket(body);
 	auto *retry = new QTimer(body);
 	retry->setSingleShot(true);
@@ -503,7 +757,7 @@ bool obs_module_load(void)
 		if (*plainMode)
 			joinChat();
 	});
-	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer, messages]() {
+	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer]() {
 		buffer->append(socket->readAll());
 		if (buffer->size() > 65536)
 			buffer->clear();
@@ -524,11 +778,15 @@ bool obs_module_load(void)
 			if (content < 0)
 				continue;
 			QString name;
+			QHash<QByteArray, QByteArray> tags_map;
 			if (line.startsWith('@')) {
 				QByteArray tags = line.mid(1, line.indexOf(' ') - 1);
-				for (const auto &tag : tags.split(';'))
-					if (tag.startsWith("display-name="))
-						name = ircUnescape(QString::fromUtf8(tag.mid(13)));
+				for (const auto &tag : tags.split(';')) {
+					const int equals = tag.indexOf('=');
+					if (equals > 0)
+						tags_map.insert(tag.left(equals), tag.mid(equals + 1));
+				}
+				name = ircUnescape(QString::fromUtf8(tags_map.value("display-name")));
 			}
 			if (name.isEmpty()) {
 				int prefix = line.indexOf(" :");
@@ -538,10 +796,16 @@ bool obs_module_load(void)
 			}
 			if (name.isEmpty())
 				continue;
-			QString message = QString::fromUtf8(line.mid(content + 2)).toHtmlEscaped();
-			messages->append(QString("<span style='color:#9146ff'>● Twitch</span> <b>%1:</b> %2")
-						 .arg(name.toHtmlEscaped(), message));
-			updateOverlay("Twitch", name, QString::fromUtf8(line.mid(content + 2)));
+			const QString message = QString::fromUtf8(line.mid(content + 2));
+			requestTwitchBadges(QString::fromLatin1(tags_map.value("room-id")));
+			QJsonArray badges;
+			for (const QByteArray &badge : tags_map.value("badges").split(',')) {
+				if (badge.isEmpty())
+					continue;
+				const QString key = QString::fromLatin1(badge);
+				badges.append(QJsonObject{{"key", key}, {"label", key.section('/', 0, 0)}});
+			}
+			appendChat("Twitch", name, message, badges, twitchEmotes(message, tags_map.value("emotes")));
 		}
 	});
 	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, status]() {
@@ -603,13 +867,18 @@ bool obs_module_load(void)
 	youtube->start(youtubeVideoId(inputs[2]->text()));
 	if (!channel->isEmpty())
 		connectChat();
-	QObject::connect(test, &QPushButton::clicked, body, [messages]() {
-		messages->append(QString::fromUtf8(
-			"<span style='color:#9146ff'>● Twitch</span> <b>exemplo:</b> Painel funcionando."));
-		messages->append(QString::fromUtf8(
-			"<span style='color:#ff0033'>● YouTube</span> <b>exemplo:</b> Mensagem de teste."));
-		updateOverlay("Twitch", "exemplo", "Painel funcionando.");
-		updateOverlay("YouTube", "exemplo", "Mensagem de teste.");
+	QObject::connect(test, &QPushButton::clicked, body, []() {
+		appendChat("Twitch", "exemplo", "Olá, chat! Kappa",
+			   QJsonArray{QJsonObject{{"key", "premium/1"}, {"label", "Prime"}}},
+			   QJsonArray{QJsonObject{{"start", 11},
+						  {"end", 16},
+						  {"label", "Kappa"},
+						  {"url",
+						   "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"}}});
+		appendChat("Kick", "exemplo", "Bem-vindos! [emote:4148074:HYPERCLAP]",
+			   QJsonArray{QJsonObject{{"label", "Subscriber"}}},
+			   kickEmotes("Bem-vindos! [emote:4148074:HYPERCLAP]"));
+		appendChat("YouTube", "exemplo", "Mensagem de teste. 😃");
 	});
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
 		delete body;
@@ -630,6 +899,15 @@ void obs_module_unload(void)
 	overlay_checkbox = nullptr;
 	overlay_status = nullptr;
 	overlay_messages = QJsonArray();
+	panel_history.clear();
+	panel_view = nullptr;
+	image_network = nullptr;
+	image_cache.clear();
+	pending_images.clear();
+	failed_images.clear();
+	twitch_badge_images = QJsonObject();
+	loaded_badge_catalogs.clear();
+	channel_badge_keys.clear();
 	if (overlay_server)
 		overlay_server->close();
 	overlay_server = nullptr;

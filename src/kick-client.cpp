@@ -132,11 +132,18 @@ void KickClient::start(const QString &channel)
 										       .value("username")
 										       .toString();
 								QString text = payload.value("content").toString();
+								QJsonArray badges = payload.value("sender")
+											    .toObject()
+											    .value("identity")
+											    .toObject()
+											    .value("badges")
+											    .toArray();
 								if (!name.isEmpty() && !text.isEmpty())
 									QMetaObject::invokeMethod(
 										this,
-										[this, name, text] {
-											emit message(name, text);
+										[this, name, text, badges] {
+											emit message(name, text,
+												     badges);
 										},
 										Qt::QueuedConnection);
 							}
