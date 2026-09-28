@@ -3,7 +3,6 @@
 #include <plugin-support.h>
 
 #include <QCheckBox>
-#include <QDockWidget>
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -18,7 +17,7 @@
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
-static QDockWidget *dock = nullptr;
+static bool dock_registered = false;
 
 static bool validSource(int platform, const QString &value)
 {
@@ -52,11 +51,8 @@ static bool validSource(int platform, const QString &value)
 
 bool obs_module_load(void)
 {
-	// OBS calls this after the frontend is initialized; ownership of the dock
-	// is transferred to the OBS main window on successful registration.
-	dock = new QDockWidget(QString::fromUtf8("Multichat"));
-	dock->setObjectName("zosma-multichat");
-	auto *body = new QWidget(dock);
+	// OBS creates the dock and its toggle in Exibir > Paineis.
+	auto *body = new QWidget();
 	auto *layout = new QVBoxLayout(body);
 	auto *form = new QFormLayout();
 	constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
@@ -108,17 +104,19 @@ bool obs_module_load(void)
 		messages->append(QString::fromUtf8(
 			"<span style='color:#ff0033'>● YouTube</span> <b>exemplo:</b> Mensagem de teste."));
 	});
-	dock->setWidget(body);
-	if (!obs_frontend_add_custom_qdock("zosma-multichat", dock)) {
-		delete dock;
-		dock = nullptr;
+	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
+		delete body;
 		return false;
 	}
+	dock_registered = true;
 	obs_log(LOG_INFO, "Multichat test dock loaded");
 	return true;
 }
 
 void obs_module_unload(void)
 {
-	dock = nullptr; // OBS owns and destroys the registered dock.
+	if (dock_registered) {
+		obs_frontend_remove_dock("zosma-multichat");
+		dock_registered = false;
+	}
 }
