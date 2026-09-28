@@ -1048,13 +1048,6 @@ bool obs_module_load(void)
 	appearance_layout->addStretch();
 	auto *kick = new KickClient(body);
 	auto *youtube = new YouTubeClient(body);
-	auto *tiktok = new TikTokClient(body);
-	QObject::connect(tiktok, &TikTokClient::status, body, [](const QString &message) {
-		capture_state.insert("TikTok", message);
-		showCaptureState();
-	});
-	QObject::connect(tiktok, &TikTokClient::message, body,
-			 [](const QString &name, const QString &message) { appendChat("TikTok", name, message); });
 	QObject::connect(youtube, &YouTubeClient::status, body,
 			 [status](const QString &message) { status->setText(message); });
 	QObject::connect(youtube, &YouTubeClient::message, body,
@@ -1187,7 +1180,7 @@ bool obs_module_load(void)
 			 });
 	QObject::connect(
 		save, &QPushButton::clicked, body,
-		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube, tiktok]() {
+		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
 			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
 			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
 			QSettings settings("Zosma", "OBS Multichat");
@@ -1227,7 +1220,6 @@ bool obs_module_load(void)
 	capture_tiktok_channel = tiktokChannel(inputs[3]->text());
 	kick->start(capture_kick_channel);
 	youtube->start(youtubeVideoId(inputs[2]->text()));
-	tiktok->start(QString());
 	if (!channel->isEmpty())
 		connectChat();
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
