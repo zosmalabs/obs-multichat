@@ -46,6 +46,8 @@ target_sources(
     src/kick-client.h
     src/youtube-client.cpp
     src/youtube-client.h
+    src/tiktok-client.cpp
+    src/tiktok-client.h
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
