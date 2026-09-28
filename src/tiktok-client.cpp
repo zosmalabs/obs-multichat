@@ -216,7 +216,10 @@ QString roomIdFromHtml(const std::string &html)
 	QRegularExpressionMatch match = QRegularExpression(QStringLiteral("\\\"roomId\\\":\\\"?(\\\\d+)\\\"?")).match(page);
 	if (match.hasMatch())
 		return match.captured(1);
-	match = QRegularExpression(QStringLiteral("\\\"room_id\\\":\\\"?(\\\\d+)\\\"?")).match(page);
+	match = QRegularExpression(QStringLiteral("room_id=(\\\\d+)")).match(page);
+	if (match.hasMatch())
+		return match.captured(1);
+	match = QRegularExpression(QStringLiteral("\\\"room_id\\\"\\\\s*:\\s*\\\"?(\\\\d+)")).match(page);
 	return match.hasMatch() ? match.captured(1) : QString();
 }
 
@@ -296,9 +299,25 @@ void TikTokClient::start(const QString &channel)
 			if (!httpGet(liveUrl, html)) {
 				report(QString::fromUtf8("TikTok: não foi possível abrir a LIVE. Tentando novamente..."));
 			} else {
-				const QString roomId = roomIdFromHtml(html);
+				QString roomId = roomIdFromHtml(html);
 				if (roomId.isEmpty()) {
-					report(QString::fromUtf8("TikTok: LIVE não encontrada ou TikTok bloqueou a consulta."));
+					report(QString::fromUtf8("TikTok: página sem roomId. Tentando API de fallback..."));
+					std::string fallback;
+					const std::string apiUrl =
+						"https://www.tiktok.com/api-live/user/room/?aid=1988&app_name=tiktok_web"
+						"&device_platform=web&sourceType=54&uniqueId=" + encoded(channel);
+					if (httpGet(apiUrl, fallback)) {
+						QJsonParseError jsonError;
+						const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(fallback), &jsonError);
+						if (jsonError.error == QJsonParseError::NoError && doc.isObject()) {
+							const QJsonObject data = doc.object().value("data").toObject();
+							const QJsonObject user = data.value("user").toObject();
+							roomId = user.value("roomId").toVariant().toString();
+						}
+					}
+				}
+				if (roomId.isEmpty()) {
+					report(QString::fromUtf8("TikTok: não foi possível obter o roomId da LIVE."));
 				} else {
 					report(QString::fromUtf8("TikTok: LIVE encontrada. Iniciando polling HTTP..."));
 					std::string cursor;
