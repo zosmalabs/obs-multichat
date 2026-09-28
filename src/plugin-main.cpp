@@ -1052,6 +1052,13 @@ bool obs_module_load(void)
 			 [status](const QString &message) { status->setText(message); });
 	QObject::connect(youtube, &YouTubeClient::message, body,
 			 [](const QString &name, const QString &message) { appendChat("YouTube", name, message); });
+	auto *tiktok = new TikTokClient(body);
+	QObject::connect(tiktok, &TikTokClient::status, body, [](const QString &message) {
+		capture_state.insert("TikTok", message);
+		showCaptureState();
+	});
+	QObject::connect(tiktok, &TikTokClient::message, body,
+			 [](const QString &name, const QString &message) { appendChat("TikTok", name, message); });
 	QObject::connect(kick, &KickClient::status, body,
 			 [status](const QString &message) { status->setText(message); });
 	QObject::connect(kick, &KickClient::message, body,
@@ -1180,7 +1187,7 @@ bool obs_module_load(void)
 			 });
 	QObject::connect(
 		save, &QPushButton::clicked, body,
-		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
+		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube, tiktok]() {
 			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
 			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
 			QSettings settings("Zosma", "OBS Multichat");
@@ -1201,6 +1208,7 @@ bool obs_module_load(void)
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
 			startCapture(*channel, kick_name, QString());
+			tiktok->start(tiktokChannel(inputs[3]->text()));
 			youtube->start(youtubeVideoId(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
@@ -1219,6 +1227,7 @@ bool obs_module_load(void)
 	capture_tiktok_channel = tiktokChannel(inputs[3]->text());
 	kick->start(capture_kick_channel);
 	youtube->start(youtubeVideoId(inputs[2]->text()));
+	tiktok->start(capture_tiktok_channel);
 	if (!channel->isEmpty())
 		connectChat();
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
@@ -1236,7 +1245,7 @@ bool obs_module_load(void)
 			startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
 	});
 	capture_retry->start();
-	startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
+	startCapture(capture_twitch_channel, capture_kick_channel, QString());
 	dock_registered = true;
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	obs_log(LOG_INFO, "Multichat test dock loaded");
