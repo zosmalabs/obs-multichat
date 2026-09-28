@@ -4,6 +4,8 @@
 #include <util/platform.h>
 
 #include <QCheckBox>
+#include <QCloseEvent>
+#include <QScreen>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -74,6 +76,20 @@ static QJsonObject twitch_badge_images;
 static QSet<QString> loaded_badge_catalogs;
 static QSet<QString> channel_badge_keys;
 static QHash<QString, QJsonArray> captured_badges;
+// Keep the browser rendering when its diagnostic window is dismissed.
+class TikTokCaptureWindow : public QWidget {
+public:
+	TikTokCaptureWindow() : QWidget(nullptr, Qt::Tool) {}
+
+protected:
+	void closeEvent(QCloseEvent *event) override
+	{
+		event->ignore();
+		resize(1280, 800);
+		move(-4000, -3000);
+	}
+};
+static QPointer<TikTokCaptureWindow> tiktok_window;
 static QPointer<QWidget> capture_window;
 static QPointer<QCefWidget> twitch_capture;
 static QPointer<QCefWidget> kick_capture;
@@ -131,8 +147,14 @@ static void receiveCaptureTitle(const QString &title)
 			capture_state.insert(platform,
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
-			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
-							       .arg(payload.value("rows").toInt()));
+			const int parsed = payload.value("parsed").toInt();
+			capture_state.insert(
+				platform,
+				parsed > 0
+					? QString::fromUtf8("leitor ativo (%1 mensagens identificadas)").arg(parsed)
+					: QString::fromUtf8(
+						  "página aberta, nenhuma mensagem identificada (%1 linhas candidatas)")
+						  .arg(payload.value("rows").toInt()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -153,6 +175,8 @@ static void stopCapture()
 			kick_capture->closeBrowser();
 		if (tiktok_capture)
 			tiktok_capture->closeBrowser();
+		delete tiktok_window;
+		tiktok_window = nullptr;
 		delete capture_window;
 	}
 	twitch_capture = nullptr;
@@ -832,7 +856,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 	if (!capture_window) {
 		capture_window = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint);
 		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
-		capture_window->setGeometry(-3000, -3000, 1140, 600);
+		capture_window->setGeometry(-4000, -3000, 2040, 800);
 		capture_window->show();
 	}
 	auto update = [&](QPointer<QCefWidget> &widget, const QString &channel, const QString &url, int x,
@@ -847,7 +871,22 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 		}
 		const bool created = !widget;
 		if (created) {
-			widget = capture_cef->create_widget(capture_window, url.toStdString());
+			QWidget *browser_parent = capture_window;
+			if (platform == "TikTok") {
+				if (!tiktok_window) {
+					tiktok_window = new TikTokCaptureWindow();
+					tiktok_window->setWindowTitle(
+						QString::fromUtf8("TikTok — página usada pelo Multichat"));
+					tiktok_window->setAttribute(Qt::WA_ShowWithoutActivating);
+					tiktok_window->setGeometry(-4000, -3000, 1280, 800);
+					auto *browser_layout = new QVBoxLayout(tiktok_window);
+					browser_layout->setContentsMargins(0, 0, 0, 0);
+					tiktok_window->show();
+				}
+				browser_parent = tiktok_window;
+			}
+			widget = capture_cef->create_widget(browser_parent,
+							    platform == "TikTok" ? "about:blank" : url.toStdString());
 			if (!widget)
 				return;
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
@@ -862,12 +901,15 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 							 showCaptureState();
 						 }
 					 });
-			widget->setGeometry(x, 0, 380, 600);
+			if (platform == "TikTok")
+				tiktok_window->layout()->addWidget(widget);
+			else
+				widget->setGeometry(x, 0, 380, 600);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
 			widget->show();
 		}
-		if (!created)
+		if (!created || platform == "TikTok")
 			widget->setURL(url.toStdString());
 	};
 	if (twitch != capture_twitch_channel || !twitch_capture) {
@@ -985,6 +1027,29 @@ bool obs_module_load(void)
 	capture_status = new QLabel(body);
 	capture_status->setWordWrap(true);
 	sources_layout->addWidget(capture_status);
+	auto *inspect_tiktok = new QPushButton(QString::fromUtf8("Ver página do TikTok"), body);
+	sources_layout->addWidget(inspect_tiktok);
+	QObject::connect(inspect_tiktok, &QPushButton::clicked, body, [body, status]() {
+		if (!tiktok_window || !tiktok_capture) {
+			status->setText(QString::fromUtf8("Salve o canal do TikTok e aguarde a abertura da página."));
+			return;
+		}
+		const QRect screen = body->screen()->availableGeometry();
+		tiktok_window->resize(qMin(1280, screen.width()), qMin(800, screen.height() - 60));
+		tiktok_window->move(screen.center() - tiktok_window->rect().center());
+		tiktok_window->showNormal();
+		tiktok_window->raise();
+		tiktok_window->activateWindow();
+	});
+	auto *reload_tiktok = new QPushButton(QString::fromUtf8("Recarregar TikTok"), body);
+	sources_layout->addWidget(reload_tiktok);
+	QObject::connect(reload_tiktok, &QPushButton::clicked, body, []() {
+		if (tiktok_capture) {
+			capture_state.insert("TikTok", QString::fromUtf8("recarregando página..."));
+			showCaptureState();
+			tiktok_capture->reloadPage();
+		}
+	});
 	sources_layout->addStretch();
 	showCaptureState();
 	auto *appearance = new QGroupBox(QString::fromUtf8("Personalização"), appearance_page);

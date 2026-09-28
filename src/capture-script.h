@@ -79,7 +79,7 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   let initialized = false;
   let lastStatus = 0;
   let sequence = 0;
-  const rowsSelector = '[data-e2e="chat-message"]';
+  const rowsSelector = '[data-e2e="chat-message"], [class*="DivChatMessageList"] > div, [class*="live-shared-ui-chat-list"] [data-e2e="comment-username"]';
   const enqueue = data => { if (pending.length < 100) pending.push(data); };
   setInterval(() => {
     if (!pending.length) return;
@@ -89,13 +89,20 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   }, 130);
   function scan() {
     const rows = [...document.querySelectorAll(rowsSelector)].slice(-80);
-    for (const row of rows) {
-      const nameNode = row.querySelector('[data-e2e="message-owner-name"]');
+    let parsed = 0;
+    const visited = new Set();
+    for (let row of rows) {
+      if (row.matches('[data-e2e="comment-username"]')) row = row.closest('.text-UIText1') || row.parentElement;
+      if (!row || visited.has(row) || row.matches('[data-e2e="enter-message"]')) continue;
+      visited.add(row);
+      const nameNode = row.querySelector('[data-e2e="message-owner-name"], [data-e2e="comment-username"]');
       const name = (nameNode?.textContent || nameNode?.getAttribute('title') || '').trim().slice(0, 80);
-      const messageNode = row.querySelector('[class*="-DivComment"], .live-shared-ui-chat-list-chat-message-comment, [data-e2e="chat-message"] .break-words.align-middle') ||
-        nameNode?.closest('[class*="DivUserInfo"]')?.nextElementSibling;
+      const messageNode = row.querySelector('[class*="-DivComment"], .live-shared-ui-chat-list-chat-message-comment, .break-words.align-middle') ||
+        nameNode?.closest('[class*="DivUserInfo"]')?.nextElementSibling ||
+        (row.matches('.text-UIText1') ? row.children[1] : null);
       const message = (messageNode?.textContent || '').trim().slice(0, 500);
       if (!name || !message) continue;
+      parsed++;
       const signature = name + '\n' + message;
       if (seen.get(row) === signature) continue;
       seen.set(row, signature);
@@ -104,7 +111,7 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
     initialized = true;
     if (Date.now() - lastStatus > 5000) {
       lastStatus = Date.now();
-      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href});
+      enqueue({type:'status', platform:'TikTok', rows:rows.length, parsed, url:location.href});
     }
   }
   const observer = new MutationObserver(() => {
