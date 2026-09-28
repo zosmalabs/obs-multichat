@@ -12,9 +12,6 @@
 #include <QUrl>
 #include <QColorDialog>
 #include <QComboBox>
-#include <QAudioDevice>
-#include <QMediaDevices>
-#include <QSoundEffect>
 #include <QSlider>
 #include <QCryptographicHash>
 #include <QFormLayout>
@@ -55,6 +52,17 @@
 #include <QUrlQuery>
 #include <QStringList>
 #include <curl/curl.h>
+#include <cstring>
+#include <memory>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#else
+#include <QAudioDevice>
+#include <QMediaDevices>
+#include <QSoundEffect>
+#endif
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -91,9 +99,76 @@ static QPointer<QCefWidget> kick_capture;
 static QCef *capture_cef = nullptr;
 static QString capture_twitch_channel;
 static QString capture_kick_channel;
+#ifdef _WIN32
+static QPointer<QObject> notification_owner;
+static UINT notification_device = WAVE_MAPPER;
+static int notification_volume = 50;
+#else
 static QPointer<QSoundEffect> notification_sound;
+#endif
 static bool notification_enabled = false;
 static qint64 last_notification_ms = 0;
+#ifdef _WIN32
+struct NativePlayback {
+	HWAVEOUT handle = nullptr;
+	WAVEHDR header = {};
+	QByteArray pcm;
+	bool prepared = false;
+	~NativePlayback()
+	{
+		if (!handle)
+			return;
+		waveOutReset(handle);
+		if (prepared)
+			waveOutUnprepareHeader(handle, &header, sizeof(header));
+		waveOutClose(handle);
+	}
+};
+#endif
+
+static void playNotification()
+{
+#ifdef _WIN32
+	if (!notification_owner)
+		return;
+	QFile file(":/multichat/notification.wav");
+	if (!file.open(QIODevice::ReadOnly))
+		return;
+	const QByteArray wav = file.readAll();
+	if (wav.size() <= 44 || wav.left(4) != "RIFF" || wav.mid(8, 4) != "WAVE")
+		return;
+	auto playback = std::make_shared<NativePlayback>();
+	playback->pcm = wav.mid(44);
+	for (qsizetype i = 0; i + 1 < playback->pcm.size(); i += 2) {
+		qint16 sample;
+		std::memcpy(&sample, playback->pcm.constData() + i, sizeof(sample));
+		sample = static_cast<qint16>((static_cast<int>(sample) * notification_volume) / 100);
+		std::memcpy(playback->pcm.data() + i, &sample, sizeof(sample));
+	}
+	WAVEFORMATEX format = {};
+	format.wFormatTag = WAVE_FORMAT_PCM;
+	format.nChannels = 1;
+	format.nSamplesPerSec = 44100;
+	format.wBitsPerSample = 16;
+	format.nBlockAlign = 2;
+	format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+	if (waveOutOpen(&playback->handle, notification_device, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
+		return;
+	playback->header.lpData = playback->pcm.data();
+	playback->header.dwBufferLength = static_cast<DWORD>(playback->pcm.size());
+	if (waveOutPrepareHeader(playback->handle, &playback->header, sizeof(playback->header)) != MMSYSERR_NOERROR)
+		return;
+	playback->prepared = true;
+	if (waveOutWrite(playback->handle, &playback->header, sizeof(playback->header)) != MMSYSERR_NOERROR)
+		return;
+	// Keep the sample and header alive until playback ends; cancel safely when the dock closes.
+	QTimer::singleShot(700, notification_owner, [playback] {});
+#else
+	if (notification_sound)
+		notification_sound->play();
+#endif
+}
+
 class CaptureWindow : public QWidget {
 public:
 	using QWidget::QWidget;
@@ -637,8 +712,8 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 		panel_history.removeFirst();
 	renderPanel();
 	const qint64 now = QDateTime::currentMSecsSinceEpoch();
-	if (notification_enabled && notification_sound && now - last_notification_ms >= 1500) {
-		notification_sound->play();
+	if (notification_enabled && now - last_notification_ms >= 1500) {
+		playNotification();
 		last_notification_ms = now;
 	}
 	if (overlay_checkbox && overlay_checkbox->isChecked())
@@ -1039,17 +1114,28 @@ bool obs_module_load(void)
 	notification_enabled = settings.value("notification_enabled", false).toBool();
 	alert_toggle->setChecked(notification_enabled);
 	alert_form->addRow(alert_toggle);
+#ifdef _WIN32
+	notification_owner = body;
+#else
 	notification_sound = new QSoundEffect(body);
 	notification_sound->setSource(QUrl("qrc:/multichat/notification.wav"));
+#endif
 	const int saved_volume = qBound(0, settings.value("notification_volume", 50).toInt(), 100);
+#ifdef _WIN32
+	notification_volume = saved_volume;
+#else
 	notification_sound->setVolume(saved_volume / 100.0);
+#endif
 	auto *alert_volume = new QSlider(Qt::Horizontal, alert_group);
 	alert_volume->setRange(0, 100);
 	alert_volume->setValue(saved_volume);
 	alert_form->addRow(QString::fromUtf8("Volume"), alert_volume);
 	QObject::connect(alert_volume, &QSlider::valueChanged, body, [](int value) {
-		if (notification_sound)
-			notification_sound->setVolume(value / 100.0);
+#ifdef _WIN32
+		notification_volume = value;
+#else
+  if (notification_sound) notification_sound->setVolume(value / 100.0);
+#endif
 		QSettings("Zosma", "OBS Multichat").setValue("notification_volume", value);
 	});
 	QObject::connect(alert_toggle, &QCheckBox::toggled, body, [](bool enabled) {
@@ -1063,14 +1149,27 @@ bool obs_module_load(void)
 		const QSignalBlocker blocker(alert_device);
 		alert_device->clear();
 		alert_device->addItem(QString::fromUtf8("Padrão do sistema"), QString());
+#ifdef _WIN32
+		for (UINT i = 0; i < waveOutGetNumDevs(); ++i) {
+			WAVEOUTCAPSW caps = {};
+			if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+				alert_device->addItem(QString::fromWCharArray(caps.szPname), QString::number(i));
+		}
+#else
 		for (const QAudioDevice &device : QMediaDevices::audioOutputs())
 			alert_device->addItem(device.description(), QString::fromLatin1(device.id().toBase64()));
+#endif
 		const int index = alert_device->findData(selected_device);
 		alert_device->setCurrentIndex(index < 0 ? 0 : index);
 	};
 	populate_devices();
 	alert_form->addRow(QString::fromUtf8("Saída de áudio"), alert_device);
 	auto apply_device = [alert_device]() {
+#ifdef _WIN32
+		bool valid = false;
+		const UINT device = alert_device->currentData().toString().toUInt(&valid);
+		notification_device = valid ? device : WAVE_MAPPER;
+#else
 		if (!notification_sound)
 			return;
 		const QByteArray id = QByteArray::fromBase64(alert_device->currentData().toString().toLatin1());
@@ -1082,6 +1181,7 @@ bool obs_module_load(void)
 			}
 		if (!device.isNull())
 			notification_sound->setAudioDevice(device);
+#endif
 	};
 	apply_device();
 	QObject::connect(
@@ -1089,17 +1189,16 @@ bool obs_module_load(void)
 			QSettings("Zosma", "OBS Multichat").setValue("notification_device", alert_device->currentData());
 			apply_device();
 		});
+#ifndef _WIN32
 	QObject::connect(new QMediaDevices(body), &QMediaDevices::audioOutputsChanged, body,
 			 [populate_devices, apply_device]() {
 				 populate_devices();
 				 apply_device();
 			 });
+#endif
 	auto *preview_sound = new QPushButton(QString::fromUtf8("Testar som"), alert_group);
 	alert_form->addRow(preview_sound);
-	QObject::connect(preview_sound, &QPushButton::clicked, body, []() {
-		if (notification_sound)
-			notification_sound->play();
-	});
+	QObject::connect(preview_sound, &QPushButton::clicked, body, []() { playNotification(); });
 	appearance_layout->addWidget(alert_group);
 
 	appearance_layout->addStretch();
@@ -1306,7 +1405,11 @@ void obs_module_unload(void)
 	overlay_messages = QJsonArray();
 	panel_history.clear();
 	panel_view = nullptr;
+#ifdef _WIN32
+	notification_owner = nullptr;
+#else
 	notification_sound = nullptr;
+#endif
 	capture_status = nullptr;
 	capture_state.clear();
 	if (asset_timer)

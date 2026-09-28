@@ -24,8 +24,14 @@ if(ENABLE_FRONTEND_API)
 endif()
 
 if(ENABLE_QT)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network Multimedia)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network Qt6::Multimedia)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
+  if(WIN32)
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE winmm)
+  else()
+    find_package(Qt6 REQUIRED COMPONENTS Multimedia)
+    target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Multimedia)
+  endif()
   target_compile_options(
     ${CMAKE_PROJECT_NAME}
     PRIVATE $<$<C_COMPILER_ID:Clang,AppleClang>:-Wno-quoted-include-in-framework-header -Wno-comma>
@@ -34,19 +40,6 @@ if(ENABLE_QT)
     ${CMAKE_PROJECT_NAME}
     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
   )
-
-  if(OS_WINDOWS)
-    # OBS does not guarantee that Qt Multimedia is included with its Qt runtime.
-    install(FILES "$<TARGET_FILE:Qt6::Multimedia>" DESTINATION bin/64bit)
-    get_target_property(_qt_multimedia_dll Qt6::Multimedia IMPORTED_LOCATION_RELEASE)
-    if(_qt_multimedia_dll)
-      get_filename_component(_qt_multimedia_bin "${_qt_multimedia_dll}" DIRECTORY)
-      file(GLOB _qt_multimedia_plugins "${_qt_multimedia_bin}/../plugins/multimedia/*.dll")
-      if(_qt_multimedia_plugins)
-        install(FILES ${_qt_multimedia_plugins} DESTINATION bin/64bit/multimedia)
-      endif()
-    endif()
-  endif()
 endif()
 
 target_sources(
