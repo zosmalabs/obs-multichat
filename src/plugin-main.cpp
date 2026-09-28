@@ -19,11 +19,81 @@
 #include "kick-client.h"
 #include "youtube-client.h"
 #include <QUrlQuery>
+#include <QStringList>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 static bool dock_registered = false;
+static obs_source_t *overlay_source = nullptr;
+static QCheckBox *overlay_checkbox = nullptr;
+static QLabel *overlay_status = nullptr;
+static QStringList overlay_lines;
+
+static bool attachOverlay()
+{
+	obs_source_t *scene_source = obs_frontend_get_current_scene();
+	if (!scene_source)
+		return false;
+	obs_scene_t *scene = obs_scene_from_source(scene_source);
+	if (!scene) {
+		obs_source_release(scene_source);
+		return false;
+	}
+	if (!overlay_source)
+		overlay_source = obs_get_source_by_name("Zosma Multichat");
+	if (!overlay_source) {
+		obs_data_t *font = obs_data_create();
+		obs_data_set_string(font, "face", "Arial");
+		obs_data_set_int(font, "size", 44);
+		obs_data_t *settings = obs_data_create();
+		obs_data_set_obj(settings, "font", font);
+		obs_data_set_string(settings, "text", "Multichat pronto. Aguardando mensagens...");
+		obs_data_set_bool(settings, "outline", true);
+#ifdef _WIN32
+		const char *source_id = "text_gdiplus";
+#else
+		const char *source_id = "text_ft2_source";
+#endif
+		overlay_source = obs_source_create(source_id, "Zosma Multichat", settings, nullptr);
+		obs_data_release(settings);
+		obs_data_release(font);
+	}
+	if (overlay_source && !obs_scene_find_source(scene, "Zosma Multichat"))
+		obs_scene_add(scene, overlay_source);
+	if (overlay_source)
+		obs_source_set_enabled(overlay_source, true);
+	obs_source_release(scene_source);
+	return overlay_source != nullptr;
+}
+
+static void updateOverlay(const QString &platform, const QString &name, const QString &message)
+{
+	QString text = QString("%1 · %2: %3").arg(platform, name, message);
+	text.replace('\n', ' ').replace('\r', ' ');
+	overlay_lines.append(text.left(200));
+	while (overlay_lines.size() > 8)
+		overlay_lines.removeFirst();
+	if (overlay_source && overlay_checkbox && overlay_checkbox->isChecked()) {
+		obs_data_t *settings = obs_data_create();
+		obs_data_set_string(settings, "text", overlay_lines.join('\n').toUtf8().constData());
+		obs_source_update(overlay_source, settings);
+		obs_data_release(settings);
+	}
+}
+
+static void frontendEvent(enum obs_frontend_event event, void *)
+{
+	if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING) {
+		if (overlay_source)
+			obs_source_release(overlay_source);
+		overlay_source = nullptr;
+	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING ||
+		   event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
+		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
+			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat ativa na cena atual."));
+	}
+}
 
 static QString twitchChannel(const QString &input)
 {
@@ -132,9 +202,30 @@ bool obs_module_load(void)
 		form->addRow(labels[i], inputs[i]);
 	}
 	layout->addLayout(form);
-	auto *overlay = new QCheckBox(QString::fromUtf8("Exibir na transmissão (em desenvolvimento)"), body);
-	overlay->setEnabled(false);
+	auto *overlay = new QCheckBox(QString::fromUtf8("Exibir na transmissão"), body);
+	overlay_checkbox = overlay;
+	overlay->setChecked(settings.value("overlay", false).toBool());
 	layout->addWidget(overlay);
+	overlay_status = new QLabel(QString::fromUtf8("Fonte de texto nas cenas usadas durante a live."), body);
+	overlay_status->setWordWrap(true);
+	layout->addWidget(overlay_status);
+	QObject::connect(overlay, &QCheckBox::toggled, body, [](bool enabled) {
+		QSettings settings("Zosma", "OBS Multichat");
+		settings.setValue("overlay", enabled);
+		if (enabled) {
+			if (overlay_status)
+				overlay_status->setText(
+					attachOverlay()
+						? QString::fromUtf8("Fonte Zosma Multichat ativa na cena atual.")
+						: QString::fromUtf8(
+							  "Não foi possível adicionar a fonte à cena atual."));
+		} else {
+			if (overlay_source)
+				obs_source_set_enabled(overlay_source, false);
+			if (overlay_status)
+				overlay_status->setText(QString::fromUtf8("Exibição na transmissão desativada."));
+		}
+	});
 	auto *status = new QLabel(QString::fromUtf8("Configure as fontes para o primeiro teste."), body);
 	status->setWordWrap(true);
 	layout->addWidget(status);
@@ -153,12 +244,14 @@ bool obs_module_load(void)
 			 [messages](const QString &name, const QString &message) {
 				 messages->append(QString("<span style='color:#ff0033'>● YouTube</span> <b>%1:</b> %2")
 							  .arg(name.toHtmlEscaped(), message.toHtmlEscaped()));
+				 updateOverlay("YouTube", name, message);
 			 });
 	QObject::connect(kick, &KickClient::status, body,
 			 [status](const QString &message) { status->setText(message); });
 	QObject::connect(kick, &KickClient::message, body, [messages](const QString &name, const QString &message) {
 		messages->append(QString("<span style='color:#53fc18'>● Kick</span> <b>%1:</b> %2")
 					 .arg(name.toHtmlEscaped(), message.toHtmlEscaped()));
+		updateOverlay("Kick", name, message);
 	});
 	auto *socket = new QSslSocket(body);
 	auto *retry = new QTimer(body);
@@ -234,6 +327,7 @@ bool obs_module_load(void)
 			QString message = QString::fromUtf8(line.mid(content + 2)).toHtmlEscaped();
 			messages->append(QString("<span style='color:#9146ff'>● Twitch</span> <b>%1:</b> %2")
 						 .arg(name.toHtmlEscaped(), message));
+			updateOverlay("Twitch", name, QString::fromUtf8(line.mid(content + 2)));
 		}
 	});
 	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, status]() {
@@ -300,18 +394,30 @@ bool obs_module_load(void)
 			"<span style='color:#9146ff'>● Twitch</span> <b>exemplo:</b> Painel funcionando."));
 		messages->append(QString::fromUtf8(
 			"<span style='color:#ff0033'>● YouTube</span> <b>exemplo:</b> Mensagem de teste."));
+		updateOverlay("Twitch", "exemplo", "Painel funcionando.");
+		updateOverlay("YouTube", "exemplo", "Mensagem de teste.");
 	});
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
 		delete body;
+		overlay_checkbox = nullptr;
+		overlay_status = nullptr;
 		return false;
 	}
 	dock_registered = true;
+	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	obs_log(LOG_INFO, "Multichat test dock loaded");
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	obs_frontend_remove_event_callback(frontendEvent, nullptr);
+	if (overlay_source)
+		obs_source_release(overlay_source);
+	overlay_source = nullptr;
+	overlay_checkbox = nullptr;
+	overlay_status = nullptr;
+	overlay_lines.clear();
 	if (dock_registered) {
 		obs_frontend_remove_dock("zosma-multichat");
 		dock_registered = false;

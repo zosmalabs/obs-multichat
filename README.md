@@ -16,7 +16,10 @@ verificação no navegador; o painel informa a falha. O conector experimental
 do YouTube aceita a URL de uma live ou do chat, lê o identificador da live
 e consulta as mensagens sem login, respeitando o tempo sugerido pela própria
 plataforma. A interface usada pelo YouTube não é pública e pode mudar. TikTok
-e exibição na transmissão seguem pendentes.
+ainda está pendente. Ao marcar Exibir na transmissão, o plugin cria uma fonte
+de texto Zosma Multichat na cena atual e nas cenas usadas depois. O OBS
+salva a fonte nas cenas. A aparência da fonte pode ser ajustada nas
+propriedades e transformações da própria fonte no OBS.
 
 Quando o Qt no OBS não disponibiliza TLS, a conexão de leitura pública da
 Twitch usa o endpoint IRC sem TLS na porta 6667. O painel informa quando
