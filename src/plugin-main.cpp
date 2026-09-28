@@ -4,6 +4,9 @@
 #include <util/platform.h>
 
 #include <QCheckBox>
+#include <QDesktopServices>
+#include <QFileInfo>
+#include <QUrl>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -986,6 +989,15 @@ bool obs_module_load(void)
 	capture_status = new QLabel(body);
 	capture_status->setWordWrap(true);
 	sources_layout->addWidget(capture_status);
+	auto *tiktok_log = new QLabel(QString::fromUtf8("Log do TikTok: %1").arg(TikTokClient::logPath()), body);
+	tiktok_log->setWordWrap(true);
+	tiktok_log->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	sources_layout->addWidget(tiktok_log);
+	auto *open_tiktok_log = new QPushButton(QString::fromUtf8("Abrir pasta do log"), body);
+	sources_layout->addWidget(open_tiktok_log);
+	QObject::connect(open_tiktok_log, &QPushButton::clicked, body, [] {
+		QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(TikTokClient::logPath()).absolutePath()));
+	});
 	sources_layout->addStretch();
 	showCaptureState();
 	auto *appearance = new QGroupBox(QString::fromUtf8("Personalização"), appearance_page);
