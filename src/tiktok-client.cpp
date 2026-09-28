@@ -24,7 +24,8 @@ constexpr const char *USER_AGENT =
 size_t writeBody(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	auto *body = static_cast<std::string *>(userdata);
-	if (body->size() + size * nmemb > 8 * 1024 * 1024) return 0;
+	if (body->size() + size * nmemb > 8 * 1024 * 1024)
+		return 0;
 	body->append(ptr, size * nmemb);
 	return size * nmemb;
 }
@@ -216,10 +217,9 @@ PollResponse parseResponse(const std::string &data)
 QString roomIdFromHtml(const std::string &html)
 {
 	const QString page = QString::fromUtf8(html);
-	for (const QString &pattern : {
-		     QStringLiteral(R"("roomId"\s*:\s*"?(\d+))"),
-		     QStringLiteral(R"("room_id"\s*:\s*"?(\d+))"),
-		     QStringLiteral(R"(room_id=(\d+))")}) {
+	for (const QString &pattern :
+	     {QStringLiteral(R"("roomId"\s*:\s*"?(\d+))"), QStringLiteral(R"("room_id"\s*:\s*"?(\d+))"),
+	      QStringLiteral(R"(room_id=(\d+))")}) {
 		const auto match = QRegularExpression(pattern).match(page);
 		if (match.hasMatch())
 			return match.captured(1);
@@ -229,14 +229,13 @@ QString roomIdFromHtml(const std::string &html)
 
 std::string baseFetchUrl(const QString &roomId, const std::string &cursor, const std::string &internalExt)
 {
-	std::string url =
-		"https://webcast.tiktok.com/webcast/im/fetch/?aid=1988&app_language=en-US&app_name=tiktok_web"
-		"&browser_language=en&browser_name=Mozilla&browser_online=true&browser_platform=Win32"
-		"&cookie_enabled=true&device_platform=web&focus_state=true&from_page=user&history_len=0"
-		"&is_fullscreen=false&is_page_visible=true&did_rule=3&fetch_rule=1&last_rtt=0&live_id=12"
-		"&resp_content_type=protobuf&screen_height=1152&screen_width=2048"
-		"&tz_name=America%2FSao_Paulo&webcast_sdk_version=1.3.0&update_version_code=1.3.0&room_id=" +
-		encoded(roomId);
+	std::string url = "https://webcast.tiktok.com/webcast/im/fetch/?aid=1988&app_language=en-US&app_name=tiktok_web"
+			  "&browser_language=en&browser_name=Mozilla&browser_online=true&browser_platform=Win32"
+			  "&cookie_enabled=true&device_platform=web&focus_state=true&from_page=user&history_len=0"
+			  "&is_fullscreen=false&is_page_visible=true&did_rule=3&fetch_rule=1&last_rtt=0&live_id=12"
+			  "&resp_content_type=protobuf&screen_height=1152&screen_width=2048"
+			  "&tz_name=America%2FSao_Paulo&webcast_sdk_version=1.3.0&update_version_code=1.3.0&room_id=" +
+			  encoded(roomId);
 	if (!cursor.empty())
 		url += "&cursor=" + encoded(QString::fromStdString(cursor));
 	if (!internalExt.empty())
@@ -293,7 +292,8 @@ void TikTokClient::start(const QString &channel)
 			QMetaObject::invokeMethod(this, [this, text] { emit status(text); }, Qt::QueuedConnection);
 		};
 		auto emitChat = [this](const QString &name, const QString &text) {
-			QMetaObject::invokeMethod(this, [this, name, text] { emit message(name, text); }, Qt::QueuedConnection);
+			QMetaObject::invokeMethod(
+				this, [this, name, text] { emit message(name, text); }, Qt::QueuedConnection);
 		};
 
 		while (!cancelled) {
@@ -301,18 +301,22 @@ void TikTokClient::start(const QString &channel)
 			std::string html;
 			const std::string liveUrl = "https://www.tiktok.com/@" + channel.toStdString() + "/live";
 			if (!httpGet(liveUrl, html)) {
-				report(QString::fromUtf8("TikTok: não foi possível abrir a LIVE. Tentando novamente..."));
+				report(QString::fromUtf8(
+					"TikTok: não foi possível abrir a LIVE. Tentando novamente..."));
 			} else {
 				QString roomId = roomIdFromHtml(html);
 				if (roomId.isEmpty()) {
-					report(QString::fromUtf8("TikTok: página sem roomId. Tentando API de fallback..."));
+					report(QString::fromUtf8(
+						"TikTok: página sem roomId. Tentando API de fallback..."));
 					std::string fallback;
 					const std::string apiUrl =
 						"https://www.tiktok.com/api-live/user/room/?aid=1988&app_name=tiktok_web"
-						"&device_platform=web&sourceType=54&uniqueId=" + encoded(channel);
+						"&device_platform=web&sourceType=54&uniqueId=" +
+						encoded(channel);
 					if (httpGet(apiUrl, fallback)) {
 						QJsonParseError jsonError;
-						const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(fallback), &jsonError);
+						const QJsonDocument doc = QJsonDocument::fromJson(
+							QByteArray::fromStdString(fallback), &jsonError);
 						if (jsonError.error == QJsonParseError::NoError && doc.isObject()) {
 							const QJsonObject data = doc.object().value("data").toObject();
 							const QJsonObject user = data.value("user").toObject();
@@ -336,7 +340,8 @@ void TikTokClient::start(const QString &channel)
 						std::string url = rawUrl;
 						std::string body;
 						if (needsSigning && !signInitialUrl(rawUrl, url, cookies)) {
-							report(QString::fromUtf8("TikTok: falha ao preparar polling HTTP. Reconectando..."));
+							report(QString::fromUtf8(
+								"TikTok: falha ao preparar polling HTTP. Reconectando..."));
 							break;
 						}
 						if (!httpGet(url, body, &cookies)) {
@@ -344,13 +349,15 @@ void TikTokClient::start(const QString &channel)
 							    httpGet(url, body, &cookies)) {
 								needsSigning = true;
 							} else {
-								report(QString::fromUtf8("TikTok: polling HTTP recusado. Reconectando..."));
+								report(QString::fromUtf8(
+									"TikTok: polling HTTP recusado. Reconectando..."));
 								break;
 							}
 						}
 						const PollResponse response = parseResponse(body);
 						if (response.cursor.empty() && response.messages.empty()) {
-							report(QString::fromUtf8("TikTok: resposta HTTP sem chat ou cursor. Reconectando..."));
+							report(QString::fromUtf8(
+								"TikTok: resposta HTTP sem chat ou cursor. Reconectando..."));
 							break;
 						}
 						if (!response.cursor.empty())
@@ -359,7 +366,8 @@ void TikTokClient::start(const QString &channel)
 							internalExt = response.internalExt;
 						for (const auto &item : response.messages) {
 							const QByteArray digest = QCryptographicHash::hash(
-								QByteArray(item.second.data(), static_cast<qsizetype>(item.second.size())),
+								QByteArray(item.second.data(),
+									   static_cast<qsizetype>(item.second.size())),
 								QCryptographicHash::Sha256);
 							if (seen.contains(digest))
 								continue;
@@ -374,7 +382,8 @@ void TikTokClient::start(const QString &channel)
 								emitChat(chat.first, chat.second);
 						}
 						initial = false;
-						report(QString::fromUtf8("TikTok: polling HTTP ativo em @%1. Aguardando comentários.")
+						report(QString::fromUtf8(
+							       "TikTok: polling HTTP ativo em @%1. Aguardando comentários.")
 							       .arg(channel));
 						for (int i = 0; i < 10 && !cancelled; ++i)
 							std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -386,4 +395,3 @@ void TikTokClient::start(const QString &channel)
 		}
 	});
 }
-
