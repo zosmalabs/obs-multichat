@@ -8,8 +8,10 @@ O plugin registra um painel acoplável em Exibir → Painéis. Permite cadastrar
 endereços de YouTube, Twitch, Kick e TikTok, salvar os campos e mostrar duas
 mensagens de demonstração pelo botão Testar painel.
 
-Esta versão ainda não recebe mensagens reais, não abre páginas de captura e
-não coloca chat na transmissão. Ela valida carregamento, painel e persistência.
+Após salvar um canal da Twitch, esta versão tenta receber mensagens reais
+diretamente por IRC/TLS, sem popup e sem login. O canal também reconecta
+automaticamente após uma queda de conexão. YouTube, Kick e TikTok ainda não
+recebem mensagens; a exibição na transmissão também está pendente.
 
 ## Primeiro teste
 
@@ -24,7 +26,7 @@ usa o pacote extraível para facilitar a substituição dos arquivos.
 
 ## Próximas etapas
 
-Implementar captura em segundo plano, reconexão, mensagens reais, identidade
+Implementar captura em segundo plano para outras plataformas, identidade
 visual e fonte de cena. Entradas previstas: Twitch e Kick (@canal ou URL do
 chat), YouTube (URL da live ou chat), TikTok (@usuário ou URL da live).
 
