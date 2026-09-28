@@ -150,13 +150,14 @@ static void receiveCaptureTitle(const QString &title)
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
 			logTikTokBrowser(
-				QString("Navegador oculto: %1 linhas, painel=%2, video=%3, login=%4, verificacao=%5, visibilidade=%6")
+				QString("Navegador oculto: %1 linhas, painel=%2, video=%3, login=%4, verificacao=%5, visibilidade=%6, caminho=%7")
 					.arg(payload.value("rows").toInt())
 					.arg(payload.value("chatSurface").toBool())
 					.arg(payload.value("video").toBool())
 					.arg(payload.value("login").toBool())
 					.arg(payload.value("verification").toBool())
-					.arg(payload.value("visibility").toString()));
+					.arg(payload.value("visibility").toString())
+					.arg(QUrl(url).path()));
 			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
 							       .arg(payload.value("rows").toInt()));
 		} else {
@@ -886,19 +887,20 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 			}
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
 					 [](const QString &title) { receiveCaptureTitle(title); });
-			QObject::connect(widget, &QCefWidget::urlChanged, capture_window,
-					 [platform](const QString &loaded) {
-						 if (loaded != "about:blank") {
-							 if (platform == "TikTok")
-								 logTikTokBrowser(QString("Pagina carregada: %1")
-											  .arg(QUrl(loaded).host()));
-							 capture_state.insert(
-								 platform, loaded.startsWith("data:")
-										   ? "falha ao carregar página"
-										   : "página aberta, aguardando chat");
-							 showCaptureState();
-						 }
-					 });
+			QObject::connect(
+				widget, &QCefWidget::urlChanged, capture_window, [platform](const QString &loaded) {
+					if (loaded != "about:blank") {
+						if (platform == "TikTok")
+							logTikTokBrowser(
+								QString("Pagina carregada: %1%2")
+									.arg(QUrl(loaded).host(), QUrl(loaded).path()));
+						capture_state.insert(platform,
+								     loaded.startsWith("data:")
+									     ? "falha ao carregar página"
+									     : "página aberta, aguardando chat");
+						showCaptureState();
+					}
+				});
 			widget->setGeometry(x, 0, platform == "TikTok" ? 1100 : 380, platform == "TikTok" ? 850 : 600);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
