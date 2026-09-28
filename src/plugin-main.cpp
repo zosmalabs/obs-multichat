@@ -1201,7 +1201,6 @@ bool obs_module_load(void)
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
 			startCapture(*channel, kick_name, QString());
-			tiktok->start(tiktokChannel(inputs[3]->text()));
 			youtube->start(youtubeVideoId(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
