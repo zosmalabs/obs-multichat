@@ -44,7 +44,8 @@ void collectChat(const QJsonValue &value, QList<QPair<QString, QString>> &out)
 
 	const QJsonObject object = value.toObject();
 	const QString type = firstString(object, {"type", "event", "eventType", "method"});
-	const QJsonObject data = object.value("data").toObject().isEmpty() ? object : object.value("data").toObject();
+	const QJsonObject data =
+		object.value("data").toObject().isEmpty() ? object : object.value("data").toObject();
 
 	if (type.contains("Chat", Qt::CaseInsensitive) || type == "chat") {
 		QJsonObject user = data.value("user").toObject();
@@ -112,7 +113,8 @@ void TikTokClient::start(const QString &channel)
 			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response);
 			if (result == CURLE_OK) {
 				retrySeconds = 3;
-				report(QString::fromUtf8("TikTok: conectado a @%1. Aguardando comentários.").arg(channel));
+				report(QString::fromUtf8("TikTok: conectado a @%1. Aguardando comentários.")
+					       .arg(channel));
 				std::string frame;
 				while (!cancelled) {
 					char bytes[65536];
