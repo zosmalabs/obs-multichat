@@ -10,7 +10,7 @@ class YouTubeClient : public QObject {
 public:
 	explicit YouTubeClient(QObject *parent = nullptr);
 	~YouTubeClient() override;
-	void start(const QString &videoId);
+	void start(const QString &source);
 signals:
 	void status(const QString &message);
 	void message(const QString &name, const QString &text);

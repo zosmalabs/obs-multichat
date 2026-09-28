@@ -12,9 +12,12 @@ diretamente por IRC/TLS, sem popup e sem login. O canal também reconecta
 automaticamente após uma queda de conexão. O conector experimental da Kick busca o ID da sala no endereço público do canal
 e se inscreve no fluxo de mensagens. A Kick pode impedir essa consulta com
 verificação no navegador; o painel informa a falha. O conector experimental
-do YouTube aceita a URL de uma live ou do chat, lê o identificador da live
-e consulta as mensagens sem login, respeitando o tempo sugerido pela própria
-plataforma. A interface usada pelo YouTube não é pública e pode mudar. Ao marcar Exibir na transmissão, o plugin cria uma fonte
+do YouTube aceita o @ do canal, o ID do canal (`UC...`) ou o link direto de uma live.
+Com @ ou ID, consulta a transmissão ativa do canal a cada 30 segundos enquanto
+ele estiver offline e volta a procurar depois que o chat encerrar. Com link direto,
+acompanha apenas a live informada. O plugin consulta as mensagens sem login,
+respeitando o tempo sugerido pela plataforma. A interface usada pelo YouTube
+não é pública e pode mudar. Ao marcar Exibir na transmissão, o plugin cria uma fonte
 de navegador Zosma Multichat Web na cena atual e nas cenas usadas depois.
 Ela recebe as mensagens de um servidor HTTP acessível somente em 127.0.0.1,
 dentro do plugin, e mostra até o número de linhas escolhido no painel. O grupo

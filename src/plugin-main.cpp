@@ -821,6 +821,15 @@ static QString youtubeVideoId(const QString &input)
 	return QRegularExpression("^[a-zA-Z0-9_-]{11}$").match(id).hasMatch() ? id : QString();
 }
 
+static QString youtubeSource(const QString &input)
+{
+	const QString source = input.trimmed();
+	if (QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(source).hasMatch() ||
+	    QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(source).hasMatch())
+		return source;
+	return youtubeVideoId(source);
+}
+
 static QString ircUnescape(QString value)
 {
 	return value.replace("\\s", " ")
@@ -853,6 +862,8 @@ static bool validSource(int platform, const QString &value)
 	const QString input = value.trimmed();
 	if (input.isEmpty())
 		return true;
+	if (platform == 2)
+		return !youtubeSource(input).isEmpty();
 	if (platform == 0 || platform == 1) {
 		if (platform == 0 && !twitchChannel(input).isEmpty())
 			return true;
@@ -870,8 +881,6 @@ static bool validSource(int platform, const QString &value)
 		return host == "twitch.tv" && !twitchChannel(input).isEmpty();
 	case 1:
 		return host == "kick.com" && !kickChannel(input).isEmpty();
-	case 2:
-		return !youtubeVideoId(input).isEmpty();
 	}
 	return false;
 }
@@ -978,7 +987,7 @@ bool obs_module_load(void)
 		overlay_background = QColor(0, 0, 0, 0);
 	for (int i = 0; i < 3; ++i) {
 		inputs[i] = new QLineEdit(body);
-		inputs[i]->setPlaceholderText(i == 2 ? "Link da live ou do chat" : "@canal ou link");
+		inputs[i]->setPlaceholderText(i == 2 ? "@canal, ID do canal ou link da live" : "@canal ou link");
 		inputs[i]->setText(settings.value(keys[i]).toString());
 		form->addRow(labels[i], inputs[i]);
 	}
@@ -1357,7 +1366,7 @@ bool obs_module_load(void)
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
 			startCapture(*channel, kick_name);
-			youtube->start(youtubeVideoId(inputs[2]->text()));
+			youtube->start(youtubeSource(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
 			socket->abort();
@@ -1372,7 +1381,7 @@ bool obs_module_load(void)
 	capture_twitch_channel = *channel;
 	capture_kick_channel = kickChannel(inputs[1]->text());
 	kick->start(capture_kick_channel);
-	youtube->start(youtubeVideoId(inputs[2]->text()));
+	youtube->start(youtubeSource(inputs[2]->text()));
 	if (!channel->isEmpty())
 		connectChat();
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
