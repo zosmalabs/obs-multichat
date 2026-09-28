@@ -826,9 +826,23 @@ static QString youtubeVideoId(const QString &input)
 static QString youtubeSource(const QString &input)
 {
 	const QString source = input.trimmed();
+	QUrl url(source);
+	QString host = url.host().toLower();
+	if (host.startsWith("www."))
+		host.remove(0, 4);
+	if (url.scheme() == "https" && host == "youtube.com") {
+		const QStringList parts = url.path().split('/', Qt::SkipEmptyParts);
+		if (parts.size() == 1 &&
+		    QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(parts[0]).hasMatch())
+			return "https://www.youtube.com/" + parts[0] + "/live";
+		if (parts.size() == 2 && parts[0] == "channel" &&
+		    QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(parts[1]).hasMatch())
+			return "https://www.youtube.com/channel/" + parts[1] + "/live";
+	}
 	if (QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(source).hasMatch() ||
 	    QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(source).hasMatch())
-		return source;
+		return source.startsWith('@') ? "https://www.youtube.com/" + source + "/live"
+					     : "https://www.youtube.com/channel/" + source + "/live";
 	return youtubeVideoId(source);
 }
 
@@ -989,7 +1003,7 @@ bool obs_module_load(void)
 		overlay_background = QColor(0, 0, 0, 0);
 	for (int i = 0; i < 3; ++i) {
 		inputs[i] = new QLineEdit(body);
-		inputs[i]->setPlaceholderText(i == 2 ? "@canal, ID do canal ou link da live" : "@canal ou link");
+		inputs[i]->setPlaceholderText(i == 2 ? "Link do canal (@ ou ID) ou link da live" : "@canal ou link");
 		inputs[i]->setText(settings.value(keys[i]).toString());
 		form->addRow(labels[i], inputs[i]);
 	}
