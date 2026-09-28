@@ -28,6 +28,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTextBrowser>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -857,7 +858,18 @@ bool obs_module_load(void)
 	// OBS creates the dock and its toggle in Exibir > Paineis.
 	auto *body = new QWidget();
 	auto *layout = new QVBoxLayout(body);
+	auto *tabs = new QTabWidget(body);
+	auto *chat_page = new QWidget(tabs);
+	auto *chat_layout = new QVBoxLayout(chat_page);
+	auto *sources_page = new QWidget(tabs);
+	auto *sources_layout = new QVBoxLayout(sources_page);
 	auto *form = new QFormLayout();
+	auto *appearance_page = new QWidget(tabs);
+	auto *appearance_layout = new QVBoxLayout(appearance_page);
+	tabs->addTab(chat_page, QString::fromUtf8("Chat"));
+	tabs->addTab(sources_page, QString::fromUtf8("Fontes"));
+	tabs->addTab(appearance_page, QString::fromUtf8("Aparência"));
+	layout->addWidget(tabs);
 	constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
 	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube", "TikTok"};
 	QLineEdit *inputs[4];
@@ -874,17 +886,18 @@ bool obs_module_load(void)
 		inputs[i]->setText(settings.value(keys[i]).toString());
 		form->addRow(labels[i], inputs[i]);
 	}
-	layout->addLayout(form);
+	sources_layout->addLayout(form);
 	auto *overlay = new QCheckBox(QString::fromUtf8("Exibir na transmissão"), body);
 	overlay_checkbox = overlay;
 	overlay->setChecked(settings.value("overlay", false).toBool());
-	layout->addWidget(overlay);
+	appearance_layout->addWidget(overlay);
 	overlay_max_lines = qBound(1, settings.value("overlay_max_lines", 8).toInt(), 30);
 	auto *max_lines = new QSpinBox(body);
 	max_lines->setRange(1, 30);
 	max_lines->setValue(overlay_max_lines);
 	max_lines->setSuffix(QString::fromUtf8(" linhas"));
-	form->addRow(QString::fromUtf8("Linhas na transmissão"), max_lines);
+	appearance_layout->addWidget(new QLabel(QString::fromUtf8("Linhas na transmissão"), appearance_page));
+	appearance_layout->addWidget(max_lines);
 	QObject::connect(max_lines, qOverload<int>(&QSpinBox::valueChanged), body, [](int count) {
 		overlay_max_lines = count;
 		QSettings settings("Zosma", "OBS Multichat");
@@ -893,7 +906,7 @@ bool obs_module_load(void)
 	});
 	overlay_status = new QLabel(QString::fromUtf8("Fonte de navegador nas cenas usadas durante a live."), body);
 	overlay_status->setWordWrap(true);
-	layout->addWidget(overlay_status);
+	appearance_layout->addWidget(overlay_status);
 	QObject::connect(overlay, &QCheckBox::toggled, body, [](bool enabled) {
 		QSettings settings("Zosma", "OBS Multichat");
 		settings.setValue("overlay", enabled);
@@ -916,9 +929,9 @@ bool obs_module_load(void)
 	});
 	auto *status = new QLabel(QString::fromUtf8("Configure as fontes para o primeiro teste."), body);
 	status->setWordWrap(true);
-	layout->addWidget(status);
+	sources_layout->addWidget(status);
 	auto *save = new QPushButton(QString::fromUtf8("Salvar fontes"), body);
-	layout->addWidget(save);
+	sources_layout->addWidget(save);
 	auto *messages = new QTextBrowser(body);
 	panel_view = messages;
 	curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -935,14 +948,15 @@ bool obs_module_load(void)
 	messages->setStyleSheet(
 		QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
 			.arg(panel_background.name()));
-	layout->addWidget(messages);
+	chat_layout->addWidget(messages);
 	image_status = new QLabel(QString::fromUtf8("Imagens carregadas: 0"), body);
-	layout->addWidget(image_status);
+	chat_layout->addWidget(image_status);
 	capture_status = new QLabel(body);
 	capture_status->setWordWrap(true);
-	layout->addWidget(capture_status);
+	sources_layout->addWidget(capture_status);
+	sources_layout->addStretch();
 	showCaptureState();
-	auto *appearance = new QGroupBox(QString::fromUtf8("Aparência"), body);
+	auto *appearance = new QGroupBox(QString::fromUtf8("Personalização"), appearance_page);
 	auto *appearance_form = new QFormLayout(appearance);
 	auto *font_size = new QSpinBox(appearance);
 	font_size->setRange(16, 64);
@@ -998,7 +1012,8 @@ bool obs_module_load(void)
 			QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
 				.arg(selected.name()));
 	});
-	layout->insertWidget(layout->indexOf(messages), appearance);
+	appearance_layout->addWidget(appearance);
+	appearance_layout->addStretch();
 	auto *kick = new KickClient(body);
 	auto *youtube = new YouTubeClient(body);
 	QObject::connect(youtube, &YouTubeClient::status, body,
@@ -1132,7 +1147,7 @@ bool obs_module_load(void)
 				 status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
 			 });
 	auto *test = new QPushButton(QString::fromUtf8("Testar painel"), body);
-	layout->addWidget(test);
+	chat_layout->addWidget(test);
 	QObject::connect(
 		save, &QPushButton::clicked, body,
 		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
