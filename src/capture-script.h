@@ -70,3 +70,52 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
   setInterval(scan, 8000);
 })())SCRIPT";
+
+static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
+  if (window.__zosmaTikTokCapture || !/(^|\.)tiktok\.com$/.test(location.hostname)) return;
+  window.__zosmaTikTokCapture = true;
+  const seen = new WeakMap();
+  const pending = [];
+  let initialized = false;
+  let lastStatus = 0;
+  let sequence = 0;
+  const rowsSelector = '[data-e2e="chat-message"]';
+  const enqueue = data => { if (pending.length < 100) pending.push(data); };
+  setInterval(() => {
+    if (!pending.length) return;
+    try {
+      document.title = 'zosma:' + btoa(unescape(encodeURIComponent(JSON.stringify({...pending.shift(), sequence: ++sequence}))));
+    } catch (_) {}
+  }, 130);
+  function scan() {
+    const rows = [...document.querySelectorAll(rowsSelector)].slice(-80);
+    for (const row of rows) {
+      const nameNode = row.querySelector('[data-e2e="message-owner-name"]');
+      const name = (nameNode?.textContent || nameNode?.getAttribute('title') || '').trim().slice(0, 80);
+      const messageNode = row.querySelector('[class*="-DivComment"], .live-shared-ui-chat-list-chat-message-comment, [data-e2e="chat-message"] .break-words.align-middle') ||
+        nameNode?.closest('[class*="DivUserInfo"]')?.nextElementSibling;
+      const message = (messageNode?.textContent || '').trim().slice(0, 500);
+      if (!name || !message) continue;
+      const signature = name + '\n' + message;
+      if (seen.get(row) === signature) continue;
+      seen.set(row, signature);
+      if (initialized) enqueue({type:'chat', platform:'TikTok', name, message});
+    }
+    initialized = true;
+    if (Date.now() - lastStatus > 5000) {
+      lastStatus = Date.now();
+      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href});
+    }
+  }
+  const observer = new MutationObserver(() => {
+    clearTimeout(window.__zosmaTikTokScanTimer);
+    window.__zosmaTikTokScanTimer = setTimeout(scan, 120);
+  });
+  function start() {
+    scan();
+    observer.observe(document.documentElement, {subtree:true, childList:true, characterData:true});
+  }
+  if (document.documentElement) start();
+  else document.addEventListener('DOMContentLoaded', start, {once:true});
+  setInterval(scan, 3000);
+})())SCRIPT";
