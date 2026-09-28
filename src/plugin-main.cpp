@@ -131,8 +131,11 @@ static void receiveCaptureTitle(const QString &title)
 			capture_state.insert(platform,
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
-			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
-							       .arg(payload.value("rows").toInt()));
+			const int parsed = payload.value("parsed").toInt();
+			capture_state.insert(platform, parsed > 0
+				? QString::fromUtf8("leitor ativo (%1 mensagens identificadas)").arg(parsed)
+				: QString::fromUtf8("página aberta, nenhuma mensagem identificada (%1 linhas candidatas)")
+					.arg(payload.value("rows").toInt()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -832,7 +835,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 	if (!capture_window) {
 		capture_window = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint);
 		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
-		capture_window->setGeometry(-3000, -3000, 1140, 600);
+		capture_window->setGeometry(-4000, -3000, 2040, 800);
 		capture_window->show();
 	}
 	auto update = [&](QPointer<QCefWidget> &widget, const QString &channel, const QString &url, int x,
@@ -847,7 +850,8 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 		}
 		const bool created = !widget;
 		if (created) {
-			widget = capture_cef->create_widget(capture_window, url.toStdString());
+			widget = capture_cef->create_widget(capture_window,
+						    platform == "TikTok" ? "about:blank" : url.toStdString());
 			if (!widget)
 				return;
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
@@ -862,12 +866,12 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 							 showCaptureState();
 						 }
 					 });
-			widget->setGeometry(x, 0, 380, 600);
+			widget->setGeometry(x, 0, platform == "TikTok" ? 1280 : 380, platform == "TikTok" ? 800 : 600);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
 			widget->show();
 		}
-		if (!created)
+		if (!created || platform == "TikTok")
 			widget->setURL(url.toStdString());
 	};
 	if (twitch != capture_twitch_channel || !twitch_capture) {
@@ -1285,3 +1289,4 @@ void obs_module_unload(void)
 		dock_registered = false;
 	}
 }
+
