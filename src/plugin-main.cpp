@@ -5,6 +5,7 @@
 
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -34,6 +35,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSpinBox>
@@ -91,6 +93,7 @@ static QString capture_twitch_channel;
 static QString capture_kick_channel;
 static QPointer<QSoundEffect> notification_sound;
 static bool notification_enabled = false;
+static qint64 last_notification_ms = 0;
 class CaptureWindow : public QWidget {
 public:
 	using QWidget::QWidget;
@@ -633,8 +636,11 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 	while (panel_history.size() > 100)
 		panel_history.removeFirst();
 	renderPanel();
-	if (notification_enabled && notification_sound)
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (notification_enabled && notification_sound && now - last_notification_ms >= 1500) {
 		notification_sound->play();
+		last_notification_ms = now;
+	}
 	if (overlay_checkbox && overlay_checkbox->isChecked())
 		refreshOverlay();
 }
@@ -1051,14 +1057,15 @@ bool obs_module_load(void)
 		QSettings("Zosma", "OBS Multichat").setValue("notification_enabled", enabled);
 	});
 	auto *alert_device = new QComboBox(alert_group);
-	const QString selected_device = settings.value("notification_device").toString();
-	auto populate_devices = [alert_device, selected_device]() {
-		const QString previous = alert_device->currentData().toString();
+	auto populate_devices = [alert_device]() {
+		const QString selected_device =
+			QSettings("Zosma", "OBS Multichat").value("notification_device").toString();
+		const QSignalBlocker blocker(alert_device);
 		alert_device->clear();
 		alert_device->addItem(QString::fromUtf8("Padrão do sistema"), QString());
 		for (const QAudioDevice &device : QMediaDevices::audioOutputs())
 			alert_device->addItem(device.description(), QString::fromLatin1(device.id().toBase64()));
-		const int index = alert_device->findData(previous.isEmpty() ? selected_device : previous);
+		const int index = alert_device->findData(selected_device);
 		alert_device->setCurrentIndex(index < 0 ? 0 : index);
 	};
 	populate_devices();

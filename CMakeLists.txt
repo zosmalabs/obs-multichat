@@ -34,6 +34,19 @@ if(ENABLE_QT)
     ${CMAKE_PROJECT_NAME}
     PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
   )
+
+  if(OS_WINDOWS)
+    # OBS does not guarantee that Qt Multimedia is included with its Qt runtime.
+    install(FILES "$<TARGET_FILE:Qt6::Multimedia>" DESTINATION bin/64bit)
+    get_target_property(_qt_multimedia_dll Qt6::Multimedia IMPORTED_LOCATION_RELEASE)
+    if(_qt_multimedia_dll)
+      get_filename_component(_qt_multimedia_bin "${_qt_multimedia_dll}" DIRECTORY)
+      file(GLOB _qt_multimedia_plugins "${_qt_multimedia_bin}/../plugins/multimedia/*.dll")
+      if(_qt_multimedia_plugins)
+        install(FILES ${_qt_multimedia_plugins} DESTINATION bin/64bit/multimedia)
+      endif()
+    endif()
+  endif()
 endif()
 
 target_sources(
