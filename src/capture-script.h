@@ -70,4 +70,3 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
   setInterval(scan, 8000);
 })())SCRIPT";
-
