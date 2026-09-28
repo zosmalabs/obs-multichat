@@ -424,22 +424,32 @@ void TikTokClient::start(const QString &channel)
 								"TikTok: falha ao preparar polling HTTP. Reconectando..."));
 							break;
 						}
-						const bool fetchOk = httpGet(url, body, &cookies, &info);
-						logTikTok("Polling inicial: " + httpSummary(info, body.size()));
-						if (!fetchOk) {
-							if (!needsSigning && signInitialUrl(rawUrl, url, cookies) &&
-							    httpGet(url, body, &cookies, &info)) {
+						bool fetchOk = httpGet(url, body, &cookies, &info);
+						logTikTok(QString("Polling %1: ")
+								  .arg(needsSigning ? "assinado" : "direto") +
+							  httpSummary(info, body.size()));
+						if (!needsSigning && (!fetchOk || body.empty())) {
+							logTikTok(
+								body.empty() && fetchOk
+									? "Polling direto vazio; tentando assinatura"
+									: "Polling direto recusado; tentando assinatura");
+							if (signInitialUrl(rawUrl, url, cookies)) {
 								needsSigning = true;
+								fetchOk = httpGet(url, body, &cookies, &info);
 								logTikTok("Polling assinado: " +
 									  httpSummary(info, body.size()));
 							} else {
-								logTikTok("Polling recusado: " +
-									  httpSummary(info, body.size()));
-								report(QString::fromUtf8(
-									       "TikTok: polling recusado: %1. Reconectando...")
-									       .arg(describeResponse(body, info)));
-								break;
+								logTikTok(
+									"Assinatura falhou apos resposta direta vazia/recusada");
 							}
+						}
+						if (!fetchOk) {
+							logTikTok("Polling recusado: " +
+								  httpSummary(info, body.size()));
+							report(QString::fromUtf8(
+								       "TikTok: polling recusado: %1. Reconectando...")
+								       .arg(describeResponse(body, info)));
+							break;
 						}
 						const PollResponse response = parseResponse(body);
 						logTikTok(
