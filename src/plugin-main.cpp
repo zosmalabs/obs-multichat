@@ -39,7 +39,8 @@ static void refreshOverlay()
 	const QString visible = overlay_lines.mid(qMax(0, overlay_lines.size() - overlay_max_lines)).join('\n');
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "text",
-			    visible.isEmpty() ? "Multichat pronto. Aguardando mensagens..." : visible.toUtf8().constData());
+			    visible.isEmpty() ? "Multichat pronto. Aguardando mensagens..."
+					      : visible.toUtf8().constData());
 	obs_source_update(overlay_source, settings);
 	obs_data_release(settings);
 }
