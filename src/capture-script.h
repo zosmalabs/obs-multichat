@@ -79,13 +79,7 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   let initialized = false;
   let lastStatus = 0;
   let sequence = 0;
-  const rowSelectors = [
-    '[data-e2e="chat-message"]',
-    '[data-e2e="live-chat-item"]',
-    '[class*="DivChatMessage"]',
-    '[class*="ChatMessage"]',
-    '[class*="chat-message"]'
-  ];
+  const rowsSelector = '[data-e2e="chat-message"]';
   const enqueue = data => { if (pending.length < 100) pending.push(data); };
   setInterval(() => {
     if (!pending.length) return;
@@ -94,23 +88,28 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
     } catch (_) {}
   }, 130);
   function scan() {
-    const rows = [...new Set(rowSelectors.flatMap(selector => [...document.querySelectorAll(selector)]))].slice(-80);
+    let rows = [...document.querySelectorAll(rowsSelector)].slice(-80);
+    if (!rows.length) rows = [...document.querySelectorAll('[data-index].w-full')].slice(-80);
     for (const row of rows) {
-      const nameNode = row.querySelector('[data-e2e="message-owner-name"], [data-e2e="chat-message-username"], [class*="UserName"], [class*="Nickname"]');
+      const nameNode = row.querySelector('[data-e2e="message-owner-name"]');
       const name = (nameNode?.textContent || nameNode?.getAttribute('title') || '').trim().slice(0, 80);
-      const messageNode = row.querySelector('[data-e2e="chat-message-comment"], [class*="-DivComment"], [class*="Comment"], .live-shared-ui-chat-list-chat-message-comment, .break-words.align-middle') ||
+      const messageNode = row.querySelector('[class*="-DivComment"], .live-shared-ui-chat-list-chat-message-comment, [data-e2e="chat-message"] .break-words.align-middle') ||
         nameNode?.closest('[class*="DivUserInfo"]')?.nextElementSibling;
-      const message = (messageNode?.textContent || '').trim().slice(0, 500);
+      let message = (messageNode?.textContent || '').trim().slice(0, 500);
+      if (!message && nameNode) {
+        const content = (row.textContent || '').trim();
+        if (content.startsWith(name)) message = content.slice(name.length).trim().slice(0, 500);
+      }
       if (!name || !message) continue;
       const signature = name + '\n' + message;
       if (seen.get(row) === signature) continue;
       seen.set(row, signature);
       if (initialized) enqueue({type:'chat', platform:'TikTok', name, message});
     }
-    initialized = true;
+    if (rows.length) initialized = true;
     if (Date.now() - lastStatus > 5000) {
       lastStatus = Date.now();
-      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href, title:document.title.slice(0,120)});
+      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href});
     }
   }
   const observer = new MutationObserver(() => {
