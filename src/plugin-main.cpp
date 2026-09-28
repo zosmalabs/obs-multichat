@@ -3,7 +3,10 @@
 #include <plugin-support.h>
 
 #include <QCheckBox>
+#include <QColorDialog>
+#include <QComboBox>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QJsonArray>
@@ -37,31 +40,52 @@ static QCheckBox *overlay_checkbox = nullptr;
 static QLabel *overlay_status = nullptr;
 static QJsonArray overlay_messages;
 static int overlay_max_lines = 8;
+static int overlay_font_size = 32;
+static bool overlay_nick_colors = true;
+static bool overlay_cards = true;
+static QColor overlay_background = QColor(0, 0, 0, 0);
 static bool shutting_down = false;
 static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
+
+static QString cssColor(const QColor &color)
+{
+	return QString("rgba(%1,%2,%3,%4)")
+		.arg(color.red())
+		.arg(color.green())
+		.arg(color.blue())
+		.arg(color.alphaF(), 0, 'f', 3);
+}
 
 static QByteArray overlayPayload()
 {
 	QJsonObject payload;
 	payload.insert("limit", overlay_max_lines);
 	payload.insert("messages", overlay_messages);
+	payload.insert("fontSize", overlay_font_size);
+	payload.insert("nickColors", overlay_nick_colors);
+	payload.insert("cards", overlay_cards);
+	payload.insert("background", cssColor(overlay_background));
 	return QJsonDocument(payload).toJson(QJsonDocument::Compact);
 }
 
 static constexpr const char *overlay_html = R"HTML(<!doctype html><html><meta charset="utf-8"><style>
-html,body{margin:0;background:transparent;overflow:hidden;font:32px Arial,sans-serif;color:white}
-#chat{display:flex;flex-direction:column;justify-content:flex-end;height:100vh;gap:8px;padding:12px;box-sizing:border-box}
-.line{overflow-wrap:anywhere;text-shadow:1px 2px 4px #000,0 0 3px #000}
-.badge{display:inline-block;border-radius:50%;width:20px;height:20px;vertical-align:middle;margin-right:8px;background:var(--color)}
-.nick{color:var(--color);font-weight:bold}.message{white-space:pre-wrap}
+html,body{margin:0;overflow:hidden;font:32px Arial,sans-serif;color:#fff;background:transparent}
+#chat{display:flex;flex-direction:column;justify-content:flex-end;height:100vh;gap:9px;padding:16px;box-sizing:border-box}
+.line{overflow-wrap:anywhere;text-shadow:0 2px 4px #0009,0 0 2px #0008;line-height:1.3}
+.cards .line{background:#111c;border-left:4px solid var(--color);border-radius:8px;padding:7px 12px;box-shadow:0 2px 10px #0003}
+.badge{display:inline-grid;place-items:center;width:1.45em;height:1.45em;border-radius:6px;vertical-align:middle;margin-right:8px;background:var(--color);color:#fff;font:bold .68em Arial,sans-serif;text-shadow:0 1px 2px #0008}
+.nick{color:var(--nick-color);font-weight:700}.message{white-space:pre-wrap}
 </style><div id="chat"></div><script>
 const colors={Twitch:'#9146ff',Kick:'#53fc18',YouTube:'#ff0033',TikTok:'#ffffff'};
+const badges={Twitch:'T',Kick:'K',YouTube:'▶',TikTok:'♪'};
 const chat=document.getElementById('chat');
-function draw(data){chat.replaceChildren();for(const item of data.messages.slice(-data.limit)){
+function draw(data){document.body.style.background=data.background;document.body.style.fontSize=data.fontSize+'px';
+ chat.classList.toggle('cards',data.cards);chat.replaceChildren();for(const item of data.messages.slice(-data.limit)){
  const row=document.createElement('div');row.className='line';row.style.setProperty('--color',colors[item.platform]||'#fff');
- const badge=document.createElement('span');badge.className='badge';
+ row.style.setProperty('--nick-color',data.nickColors?(colors[item.platform]||'#fff'):'#fff');
+ const badge=document.createElement('span');badge.className='badge';badge.textContent=badges[item.platform]||'?';badge.title=item.platform;
  const nick=document.createElement('span');nick.className='nick';nick.textContent=item.name+': ';
  const message=document.createElement('span');message.className='message';message.textContent=item.message;
  row.append(badge,nick,message);chat.append(row);
@@ -301,6 +325,12 @@ bool obs_module_load(void)
 	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube", "TikTok"};
 	QLineEdit *inputs[4];
 	QSettings settings("Zosma", "OBS Multichat");
+	overlay_font_size = qBound(16, settings.value("overlay_font_size", 32).toInt(), 64);
+	overlay_nick_colors = settings.value("overlay_nick_colors", true).toBool();
+	overlay_cards = settings.value("overlay_cards", true).toBool();
+	overlay_background = QColor(settings.value("overlay_background", "#00000000").toString());
+	if (!overlay_background.isValid())
+		overlay_background = QColor(0, 0, 0, 0);
 	for (int i = 0; i < 4; ++i) {
 		inputs[i] = new QLineEdit(body);
 		inputs[i]->setPlaceholderText(i == 2 ? "Link da live ou do chat" : "@canal ou link");
@@ -356,7 +386,70 @@ bool obs_module_load(void)
 	messages->setOpenExternalLinks(false);
 	messages->setPlaceholderText(
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
+	QColor panel_background(settings.value("panel_background", "#161922").toString());
+	if (!panel_background.isValid())
+		panel_background = QColor("#161922");
+	messages->setStyleSheet(
+		QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
+			.arg(panel_background.name()));
 	layout->addWidget(messages);
+	auto *appearance = new QGroupBox(QString::fromUtf8("Aparência"), body);
+	auto *appearance_form = new QFormLayout(appearance);
+	auto *font_size = new QSpinBox(appearance);
+	font_size->setRange(16, 64);
+	font_size->setSuffix(" px");
+	font_size->setValue(overlay_font_size);
+	appearance_form->addRow(QString::fromUtf8("Letra na transmissão"), font_size);
+	QObject::connect(font_size, qOverload<int>(&QSpinBox::valueChanged), body, [](int size) {
+		overlay_font_size = size;
+		QSettings("Zosma", "OBS Multichat").setValue("overlay_font_size", size);
+		refreshOverlay();
+	});
+	auto *layout_style = new QComboBox(appearance);
+	layout_style->addItem(QString::fromUtf8("Cartões"));
+	layout_style->addItem(QString::fromUtf8("Simples"));
+	layout_style->setCurrentIndex(overlay_cards ? 0 : 1);
+	appearance_form->addRow(QString::fromUtf8("Estilo"), layout_style);
+	QObject::connect(layout_style, qOverload<int>(&QComboBox::currentIndexChanged), body, [](int index) {
+		overlay_cards = index == 0;
+		QSettings("Zosma", "OBS Multichat").setValue("overlay_cards", overlay_cards);
+		refreshOverlay();
+	});
+	auto *nick_colors = new QCheckBox(QString::fromUtf8("Nicks nas cores das plataformas"), appearance);
+	nick_colors->setChecked(overlay_nick_colors);
+	appearance_form->addRow(nick_colors);
+	QObject::connect(nick_colors, &QCheckBox::toggled, body, [](bool enabled) {
+		overlay_nick_colors = enabled;
+		QSettings("Zosma", "OBS Multichat").setValue("overlay_nick_colors", enabled);
+		refreshOverlay();
+	});
+	auto *overlay_color =
+		new QPushButton(QString::fromUtf8("Selecionar cor (transparente por padrão)"), appearance);
+	appearance_form->addRow(QString::fromUtf8("Fundo da transmissão"), overlay_color);
+	QObject::connect(overlay_color, &QPushButton::clicked, body, [body]() {
+		const QColor selected = QColorDialog::getColor(overlay_background, body,
+							       QString::fromUtf8("Fundo da transmissão"),
+							       QColorDialog::ShowAlphaChannel);
+		if (!selected.isValid())
+			return;
+		overlay_background = selected;
+		QSettings("Zosma", "OBS Multichat").setValue("overlay_background", selected.name(QColor::HexArgb));
+		refreshOverlay();
+	});
+	auto *panel_color = new QPushButton(QString::fromUtf8("Selecionar cor"), appearance);
+	appearance_form->addRow(QString::fromUtf8("Fundo do painel"), panel_color);
+	QObject::connect(panel_color, &QPushButton::clicked, body, [body, messages, panel_background]() mutable {
+		const QColor selected =
+			QColorDialog::getColor(panel_background, body, QString::fromUtf8("Fundo do painel"));
+		if (!selected.isValid())
+			return;
+		panel_background = selected;
+		QSettings("Zosma", "OBS Multichat").setValue("panel_background", selected.name());
+		messages->setStyleSheet(
+			QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
+				.arg(selected.name()));
+	});
+	layout->insertWidget(layout->indexOf(messages), appearance);
 	auto *kick = new KickClient(body);
 	auto *youtube = new YouTubeClient(body);
 	QObject::connect(youtube, &YouTubeClient::status, body,

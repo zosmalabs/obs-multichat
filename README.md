@@ -19,7 +19,11 @@ plataforma. A interface usada pelo YouTube não é pública e pode mudar. TikTok
 ainda está pendente. Ao marcar Exibir na transmissão, o plugin cria uma fonte
 de navegador Zosma Multichat Web na cena atual e nas cenas usadas depois.
 Ela recebe as mensagens de um servidor HTTP acessível somente em 127.0.0.1,
-dentro do plugin, e mostra até o número de linhas escolhido no painel.
+dentro do plugin, e mostra até o número de linhas escolhido no painel. O grupo
+Aparência oferece tamanho de letra, estilo cartões ou simples, cores dos nicks
+por plataforma e cor do fundo da transmissão (inclusive transparente), além
+da cor de fundo do painel de mensagens. As escolhas ficam salvas e atualizam
+a fonte de navegador em tempo real.
 O OBS salva a fonte nas cenas e o plugin atualiza seu endereço local ao reiniciar.
 A fonte de texto anterior Zosma Multichat é removida na primeira ativação
 da fonte de navegador.
