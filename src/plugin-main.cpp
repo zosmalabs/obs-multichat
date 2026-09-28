@@ -117,8 +117,9 @@ static void receiveCaptureTitle(const QString &title)
 	if (payload.value("type").toString() == "status") {
 		const QString url = payload.value("url").toString();
 		if (QUrl(url).host() != "kick.com" && QUrl(url).host() != "www.kick.com" &&
-		    QUrl(url).host() != "www.twitch.tv") {
-			capture_state.insert(platform, "página inesperada");
+		    QUrl(url).host() != "www.twitch.tv" && QUrl(url).host() != "twitch.tv") {
+			capture_state.insert(platform,
+					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -423,8 +424,9 @@ static void requestChatImage(const QString &url)
 	    image_cache.size() + pending_images.size() >= 200)
 		return;
 	const QUrl parsed(url);
-	if (parsed.scheme() != "https" || (parsed.host() != "static-cdn.jtvnw.net" &&
-					   parsed.host() != "files.kick.com" && parsed.host() != "cdn.kick.com"))
+	if (parsed.scheme() != "https" ||
+	    (parsed.host() != "static-cdn.jtvnw.net" && parsed.host() != "files.kick.com" &&
+	     parsed.host() != "cdn.kick.com" && parsed.host() != "ext.cdn.kick.com"))
 		return;
 	pending_images.insert(url);
 	const QString token =
@@ -570,7 +572,7 @@ static void receiveCapturedBadges(const QByteArray &bytes)
 			token_urls.insert(token, url);
 		} else if (QUrl(url).scheme() != "https" ||
 			   (QUrl(url).host() != "static-cdn.jtvnw.net" && QUrl(url).host() != "files.kick.com" &&
-			    QUrl(url).host() != "cdn.kick.com")) {
+			    QUrl(url).host() != "cdn.kick.com" && QUrl(url).host() != "ext.cdn.kick.com")) {
 			continue;
 		}
 		badges.append(QJsonObject{{"label", badge.value("label").toString().left(40)}, {"image", url}});
@@ -815,8 +817,9 @@ static void startCapture(const QString &twitch, const QString &kick)
 			}
 			return;
 		}
-		if (!widget) {
-			widget = capture_cef->create_widget(capture_window, "about:blank");
+		const bool created = !widget;
+		if (created) {
+			widget = capture_cef->create_widget(capture_window, url.toStdString());
 			if (!widget)
 				return;
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
@@ -836,7 +839,8 @@ static void startCapture(const QString &twitch, const QString &kick)
 			widget->allowAllPopups(false);
 			widget->show();
 		}
-		widget->setURL(url.toStdString());
+		if (!created)
+			widget->setURL(url.toStdString());
 	};
 	if (twitch != capture_twitch_channel || !twitch_capture) {
 		capture_twitch_channel = twitch;

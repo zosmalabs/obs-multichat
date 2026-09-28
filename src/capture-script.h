@@ -2,6 +2,7 @@
 
 static constexpr const char *capture_script = R"SCRIPT((() => {
   if (window.__zosmaBadgeCapture) return;
+  if (!location.hostname.endsWith('kick.com') && !location.hostname.endsWith('twitch.tv')) return;
   window.__zosmaBadgeCapture = true;
   const platform = location.hostname.endsWith('kick.com') ? 'Kick' : 'Twitch';
   let sequence = 0;
@@ -19,7 +20,7 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
     : 'button.inline.font-bold[data-prevent-expand], button.font-bold.inline, .chat-entry-username, .chat-message-identity button[title]';
   const badgeSelector = platform === 'Twitch'
     ? 'img.chat-badge, .seventv-chat-badge img'
-    : '.badge-tooltip img, .badge-tooltip svg, .base-badge img, .base-badge svg, .badge img, .badge svg';
+    : 'svg[data-ds-icon], img[src], .badge-tooltip svg';
   async function imageFor(node) {
     if (node.tagName !== 'svg') return node.currentSrc || node.src || '';
     try {
@@ -37,10 +38,14 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
     const rows = [...document.querySelectorAll(selector)].slice(-45);
     let found = 0;
     for (const row of rows) {
-      const name = row.querySelector(nameSelector)?.textContent?.trim();
+      const nameNode = row.querySelector(nameSelector);
+      const name = nameNode?.textContent?.trim();
       if (!name) continue;
-      const badgeRoot = platform === 'Kick' ? row.querySelector('.chat-message-identity') || row : row;
-      const badgeNodes = [...badgeRoot.querySelectorAll(badgeSelector)].filter(n => !n.closest('.chat-entry-content, .chat-line__message--emote'));
+      const badgeRoot = platform === 'Kick' ? row.querySelector('.chat-message-identity') || nameNode.parentElement || row : row;
+      const badgeNodes = [...badgeRoot.querySelectorAll(badgeSelector)].filter(n =>
+        !n.closest('button, .chat-entry-content, .chat-line__message--emote') &&
+        (platform !== 'Kick' || n.tagName.toLowerCase() === 'svg' ||
+         /\/chat\/badges\/|\/channel_subscriber_badges\//.test(n.currentSrc || n.src || '')));
       if (!badgeNodes.length) continue;
       found += badgeNodes.length;
       const signature = badgeNodes.map(n => n.outerHTML).join('|');
