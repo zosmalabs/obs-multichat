@@ -17,6 +17,8 @@
 #include <QTimer>
 #include <QRandomGenerator>
 #include "kick-client.h"
+#include "youtube-client.h"
+#include <QUrlQuery>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -34,6 +36,26 @@ static QString twitchChannel(const QString &input)
 		channel = parts.value(parts.value(0) == "popout" ? 1 : 0);
 	}
 	return QRegularExpression("^[a-zA-Z0-9_]+$").match(channel).hasMatch() ? channel.toLower() : QString();
+}
+
+static QString youtubeVideoId(const QString &input)
+{
+	QUrl url(input.trimmed());
+	if (url.scheme() != "https")
+		return {};
+	QString host = url.host().toLower();
+	if (host.startsWith("www."))
+		host.remove(0, 4);
+	QString id;
+	if (host == "youtu.be")
+		id = url.path().section('/', 1, 1);
+	else if (host == "youtube.com") {
+		if (url.path() == "/watch" || url.path() == "/live_chat")
+			id = QUrlQuery(url).queryItemValue("v");
+		else if (url.path().startsWith("/live/"))
+			id = url.path().section('/', 2, 2);
+	}
+	return QRegularExpression("^[a-zA-Z0-9_-]{11}$").match(id).hasMatch() ? id : QString();
 }
 
 static QString ircUnescape(QString value)
@@ -86,9 +108,7 @@ static bool validSource(int platform, const QString &value)
 	case 1:
 		return host == "kick.com" && !kickChannel(input).isEmpty();
 	case 2:
-		return (host == "youtube.com" && (url.path().startsWith("/watch") || url.path().startsWith("/live/") ||
-						  url.path().startsWith("/live_chat"))) ||
-		       (host == "youtu.be" && url.path().size() > 1);
+		return !youtubeVideoId(input).isEmpty();
 	case 3:
 		return host == "tiktok.com" && url.path().startsWith("/@");
 	}
@@ -126,6 +146,14 @@ bool obs_module_load(void)
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
 	layout->addWidget(messages);
 	auto *kick = new KickClient(body);
+	auto *youtube = new YouTubeClient(body);
+	QObject::connect(youtube, &YouTubeClient::status, body,
+			 [status](const QString &message) { status->setText(message); });
+	QObject::connect(youtube, &YouTubeClient::message, body,
+			 [messages](const QString &name, const QString &message) {
+				 messages->append(QString("<span style='color:#ff0033'>● YouTube</span> <b>%1:</b> %2")
+							  .arg(name.toHtmlEscaped(), message.toHtmlEscaped()));
+			 });
 	QObject::connect(kick, &KickClient::status, body,
 			 [status](const QString &message) { status->setText(message); });
 	QObject::connect(kick, &KickClient::message, body, [messages](const QString &name, const QString &message) {
@@ -230,39 +258,41 @@ bool obs_module_load(void)
 			 });
 	auto *test = new QPushButton(QString::fromUtf8("Testar painel"), body);
 	layout->addWidget(test);
-	QObject::connect(save, &QPushButton::clicked, body,
-			 [inputs, status, socket, retry, channel, buffer, connectChat, kick]() {
-				 constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
-				 constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
-				 QSettings settings("Zosma", "OBS Multichat");
-				 for (int i = 0; i < 4; ++i) {
-					 if (!validSource(i, inputs[i]->text())) {
-						 status->setText(
-							 QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
-						 return;
-					 }
-				 }
-				 for (int i = 0; i < 4; ++i)
-					 settings.setValue(keys[i], inputs[i]->text().trimmed());
-				 settings.sync();
-				 if (settings.status() != QSettings::NoError) {
-					 status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
-					 return;
-				 }
-				 *channel = twitchChannel(inputs[0]->text());
-				 kick->start(kickChannel(inputs[1]->text()));
-				 buffer->clear();
-				 retry->stop();
-				 socket->abort();
-				 if (!channel->isEmpty()) {
-					 connectChat();
-				 } else {
-					 status->setText(QString::fromUtf8(
-						 "Fontes salvas. Preencha Twitch para iniciar a captura real."));
-				 }
-			 });
+	QObject::connect(
+		save, &QPushButton::clicked, body,
+		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
+			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
+			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
+			QSettings settings("Zosma", "OBS Multichat");
+			for (int i = 0; i < 4; ++i) {
+				if (!validSource(i, inputs[i]->text())) {
+					status->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
+					return;
+				}
+			}
+			for (int i = 0; i < 4; ++i)
+				settings.setValue(keys[i], inputs[i]->text().trimmed());
+			settings.sync();
+			if (settings.status() != QSettings::NoError) {
+				status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
+				return;
+			}
+			*channel = twitchChannel(inputs[0]->text());
+			kick->start(kickChannel(inputs[1]->text()));
+			youtube->start(youtubeVideoId(inputs[2]->text()));
+			buffer->clear();
+			retry->stop();
+			socket->abort();
+			if (!channel->isEmpty()) {
+				connectChat();
+			} else if (inputs[1]->text().trimmed().isEmpty() && inputs[2]->text().trimmed().isEmpty()) {
+				status->setText(QString::fromUtf8(
+					"Fontes salvas. Preencha Twitch para iniciar a captura real."));
+			}
+		});
 	*channel = twitchChannel(inputs[0]->text());
 	kick->start(kickChannel(inputs[1]->text()));
+	youtube->start(youtubeVideoId(inputs[2]->text()));
 	if (!channel->isEmpty())
 		connectChat();
 	QObject::connect(test, &QPushButton::clicked, body, [messages]() {

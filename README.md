@@ -12,8 +12,11 @@ Após salvar um canal da Twitch, esta versão tenta receber mensagens reais
 diretamente por IRC/TLS, sem popup e sem login. O canal também reconecta
 automaticamente após uma queda de conexão. O conector experimental da Kick busca o ID da sala no endereço público do canal
 e se inscreve no fluxo de mensagens. A Kick pode impedir essa consulta com
-verificação no navegador; o painel informa a falha. YouTube e TikTok ainda
-não recebem mensagens; a exibição na transmissão também está pendente.
+verificação no navegador; o painel informa a falha. O conector experimental
+do YouTube aceita a URL de uma live ou do chat, lê o identificador da live
+e consulta as mensagens sem login, respeitando o tempo sugerido pela própria
+plataforma. A interface usada pelo YouTube não é pública e pode mudar. TikTok
+e exibição na transmissão seguem pendentes.
 
 Quando o Qt no OBS não disponibiliza TLS, a conexão de leitura pública da
 Twitch usa o endpoint IRC sem TLS na porta 6667. O painel informa quando
