@@ -30,6 +30,9 @@ da fonte de navegador. O painel usa apenas o símbolo da plataforma em cada
 mensagem. Quando OBS Browser está disponível, o plugin mantém as páginas do chat
 da Twitch e da Kick carregadas fora da tela. Ele captura as imagens das badges
 diretamente dessas páginas, inclusive SVGs e badges próprias de cada canal.
+O leitor transmite esses dados internamente pelo navegador do OBS, sem
+depender de requisições das páginas ao servidor local. O painel indica se
+as páginas estão ativas e quantas badges estão visíveis.
 As mensagens continuam vindo das conexões já existentes. A captura visual das
 badges depende da página de chat carregar e apresentar cada mensagem; não exige
 que a janela do chat permaneça visível. Emotes da

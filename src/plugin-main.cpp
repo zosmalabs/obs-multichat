@@ -62,6 +62,7 @@ static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
 static QPointer<QLabel> image_status;
+static QPointer<QLabel> capture_status;
 static QList<QJsonObject> panel_history;
 static QHash<QString, QImage> image_cache;
 static QHash<QString, QByteArray> image_bytes;
@@ -79,6 +80,7 @@ static QPointer<QCefWidget> kick_capture;
 static QCef *capture_cef = nullptr;
 static QString capture_twitch_channel;
 static QString capture_kick_channel;
+static QHash<QString, QString> capture_state;
 struct AssetRequest {
 	CURL *handle = nullptr;
 	QByteArray bytes;
@@ -94,6 +96,39 @@ static void renderPanel();
 static void requestChatImage(const QString &url);
 static void receiveCapturedBadges(const QByteArray &bytes);
 static void startCapture(const QString &twitch, const QString &kick);
+
+static void showCaptureState()
+{
+	if (capture_status)
+		capture_status->setText(QString::fromUtf8("Captura das badges · Twitch: %1 · Kick: %2")
+						.arg(capture_state.value("Twitch", "aguardando"),
+						     capture_state.value("Kick", "aguardando")));
+}
+
+static void receiveCaptureTitle(const QString &title)
+{
+	if (!title.startsWith("zosma:") || title.size() > 100000)
+		return;
+	const QByteArray bytes = QByteArray::fromBase64(title.mid(6).toLatin1());
+	const QJsonObject payload = QJsonDocument::fromJson(bytes).object();
+	const QString platform = payload.value("platform").toString();
+	if (platform != "Twitch" && platform != "Kick")
+		return;
+	if (payload.value("type").toString() == "status") {
+		const QString url = payload.value("url").toString();
+		if (QUrl(url).host() != "kick.com" && QUrl(url).host() != "www.kick.com" &&
+		    QUrl(url).host() != "www.twitch.tv") {
+			capture_state.insert(platform, "página inesperada");
+		} else {
+			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
+							       .arg(payload.value("rows").toInt())
+							       .arg(payload.value("found").toInt()));
+		}
+		showCaptureState();
+	} else {
+		receiveCapturedBadges(bytes);
+	}
+}
 
 static void stopCapture()
 {
@@ -192,53 +227,10 @@ static bool startOverlayServer(QWidget *parent)
 			QObject::connect(socket, &QTcpSocket::readyRead, parent, [socket]() {
 				if (socket->property("stream").toBool())
 					return;
-				QByteArray buffer = socket->property("requestBuffer").toByteArray() + socket->readAll();
-				if (buffer.size() > 96 * 1024) {
-					socket->disconnectFromHost();
+				if (!socket->canReadLine())
 					return;
-				}
-				const int headers_end = buffer.indexOf("\r\n\r\n");
-				if (headers_end < 0) {
-					socket->setProperty("requestBuffer", buffer);
-					return;
-				}
-				const QByteArray request = buffer.left(buffer.indexOf("\r\n"));
-				if (request.contains("/capture ") &&
-				    !buffer.left(headers_end).contains("Origin: https://www.twitch.tv") &&
-				    !buffer.left(headers_end).contains("Origin: https://kick.com")) {
-					socket->disconnectFromHost();
-					return;
-				}
-				if (request.startsWith("OPTIONS /capture ")) {
-					socket->write(
-						"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
-						"Access-Control-Allow-Methods: POST, OPTIONS\r\n"
-						"Access-Control-Allow-Headers: content-type\r\n"
-						"Access-Control-Allow-Private-Network: true\r\nContent-Length: 0\r\n\r\n");
-					socket->disconnectFromHost();
-					return;
-				}
-				if (request.startsWith("POST /capture ")) {
-					const QRegularExpression length_pattern(
-						"(?:^|\\r\\n)Content-Length: ([0-9]+)",
-						QRegularExpression::CaseInsensitiveOption);
-					const auto match =
-						length_pattern.match(QString::fromLatin1(buffer.left(headers_end)));
-					const int length = match.hasMatch() ? match.captured(1).toInt() : -1;
-					if (length < 0 || length > 80 * 1024) {
-						socket->disconnectFromHost();
-						return;
-					}
-					if (buffer.size() - headers_end - 4 < length) {
-						socket->setProperty("requestBuffer", buffer);
-						return;
-					}
-					receiveCapturedBadges(buffer.mid(headers_end + 4, length));
-					socket->write("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
-						      "Content-Length: 0\r\nConnection: close\r\n\r\n");
-					socket->disconnectFromHost();
-					return;
-				}
+				const QByteArray request = socket->readLine();
+				socket->readAll();
 				if (!request.startsWith("GET ") || !request.contains("HTTP/1.")) {
 					socket->disconnectFromHost();
 					return;
@@ -813,10 +805,7 @@ static void startCapture(const QString &twitch, const QString &kick)
 		capture_window->setGeometry(-3000, -3000, 760, 600);
 		capture_window->show();
 	}
-	const QByteArray script =
-		QByteArray(capture_script)
-			.replace("__ZOSMA_ENDPOINT__",
-				 "http://127.0.0.1:" + QByteArray::number(overlay_server->serverPort()) + "/capture");
+	const QByteArray script(capture_script);
 	auto update = [&](QPointer<QCefWidget> &widget, const QString &channel, const QString &url, int x) {
 		if (channel.isEmpty()) {
 			if (widget) {
@@ -830,6 +819,18 @@ static void startCapture(const QString &twitch, const QString &kick)
 			widget = capture_cef->create_widget(capture_window, "about:blank");
 			if (!widget)
 				return;
+			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
+					 [](const QString &title) { receiveCaptureTitle(title); });
+			QObject::connect(widget, &QCefWidget::urlChanged, capture_window,
+					 [platform = x == 0 ? "Twitch" : "Kick"](const QString &loaded) {
+						 if (loaded != "about:blank") {
+							 capture_state.insert(
+								 platform, loaded.startsWith("data:")
+										   ? "falha ao carregar página"
+										   : "página aberta, aguardando chat");
+							 showCaptureState();
+						 }
+					 });
 			widget->setGeometry(x, 0, 380, 600);
 			widget->setStartupScript(script.toStdString());
 			widget->allowAllPopups(false);
@@ -933,6 +934,10 @@ bool obs_module_load(void)
 	layout->addWidget(messages);
 	image_status = new QLabel(QString::fromUtf8("Imagens carregadas: 0"), body);
 	layout->addWidget(image_status);
+	capture_status = new QLabel(body);
+	capture_status->setWordWrap(true);
+	layout->addWidget(capture_status);
+	showCaptureState();
 	auto *appearance = new QGroupBox(QString::fromUtf8("Aparência"), body);
 	auto *appearance_form = new QFormLayout(appearance);
 	auto *font_size = new QSpinBox(appearance);
@@ -1209,6 +1214,8 @@ void obs_module_unload(void)
 	panel_history.clear();
 	panel_view = nullptr;
 	image_status = nullptr;
+	capture_status = nullptr;
+	capture_state.clear();
 	if (asset_timer)
 		asset_timer->stop();
 	stopCapture();

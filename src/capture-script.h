@@ -4,11 +4,16 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
   if (window.__zosmaBadgeCapture) return;
   window.__zosmaBadgeCapture = true;
   const platform = location.hostname.endsWith('kick.com') ? 'Kick' : 'Twitch';
-  const endpoint = '__ZOSMA_ENDPOINT__';
+  let sequence = 0;
+  function report(payload) {
+    try {
+      document.title = 'zosma:' + btoa(unescape(encodeURIComponent(JSON.stringify({...payload, sequence: ++sequence}))));
+    } catch (_) {}
+  }
   const sent = new Map();
   const selector = platform === 'Twitch'
     ? '.chat-line__message, [data-a-target="chat-line-message"]'
-    : '.chat-entry, [data-chat-entry], .chat-message';
+    : '[data-index], [data-chat-entry], .chat-entry, .chat-message';
   const nameSelector = platform === 'Twitch'
     ? '.chat-author__display-name, [data-a-target="chat-message-username"]'
     : 'button.inline.font-bold[data-prevent-expand], button.font-bold.inline, .chat-entry-username, .chat-message-identity button[title]';
@@ -30,12 +35,14 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
   }
   async function scan() {
     const rows = [...document.querySelectorAll(selector)].slice(-45);
+    let found = 0;
     for (const row of rows) {
       const name = row.querySelector(nameSelector)?.textContent?.trim();
       if (!name) continue;
       const badgeRoot = platform === 'Kick' ? row.querySelector('.chat-message-identity') || row : row;
       const badgeNodes = [...badgeRoot.querySelectorAll(badgeSelector)].filter(n => !n.closest('.chat-entry-content, .chat-line__message--emote'));
       if (!badgeNodes.length) continue;
+      found += badgeNodes.length;
       const signature = badgeNodes.map(n => n.outerHTML).join('|');
       if (sent.get(name) === signature) continue;
       sent.set(name, signature);
@@ -45,10 +52,15 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
         const image = await imageFor(node);
         if (image) badges.push({label: node.getAttribute('alt') || node.getAttribute('aria-label') || node.getAttribute('title') || 'Badge', image});
       }
-      if (badges.length) fetch(endpoint, {method:'POST', headers:{'Content-Type':'text/plain'}, body:JSON.stringify({platform,name,badges})}).catch(() => {});
+      if (badges.length) report({platform,name,badges});
+    }
+    if (!window.__zosmaStatusAt || Date.now() - window.__zosmaStatusAt > 5000) {
+      window.__zosmaStatusAt = Date.now();
+      report({type:'status',platform,rows:rows.length,found,url:location.href});
     }
   }
   const observer = new MutationObserver(() => { clearTimeout(window.__zosmaScanTimer); window.__zosmaScanTimer = setTimeout(scan, 100); });
   function start() { observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,attributeFilter:['src']}); scan(); }
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
+  setInterval(scan, 8000);
 })())SCRIPT";
