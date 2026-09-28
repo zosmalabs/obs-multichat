@@ -62,7 +62,6 @@ static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
-static QPointer<QLabel> image_status;
 static QPointer<QLabel> capture_status;
 static QList<QJsonObject> panel_history;
 static QHash<QString, QImage> image_cache;
@@ -405,14 +404,8 @@ static void pollAssets()
 			}
 		} else if (!request->catalog)
 			failed_images.insert(request->url);
-		else if (image_status)
-			image_status->setText(QString::fromUtf8("Catálogo de badges da Twitch indisponível."));
 		if (!request->catalog)
 			pending_images.remove(request->url);
-		if (image_status && !request->catalog)
-			image_status->setText(QString::fromUtf8("Imagens carregadas: %1 · indisponíveis: %2")
-						      .arg(image_cache.size())
-						      .arg(failed_images.size()));
 		delete request;
 	}
 	if (asset_requests.isEmpty())
@@ -596,10 +589,6 @@ static void receiveCapturedBadges(const QByteArray &bytes)
 			overlay_messages.replace(i, entry);
 		}
 	}
-	if (image_status)
-		image_status->setText(QString::fromUtf8("Imagens carregadas: %1 · indisponíveis: %2")
-					      .arg(image_cache.size())
-					      .arg(failed_images.size()));
 	renderPanel();
 	refreshOverlay();
 }
@@ -949,8 +938,6 @@ bool obs_module_load(void)
 		QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
 			.arg(panel_background.name()));
 	chat_layout->addWidget(messages);
-	image_status = new QLabel(QString::fromUtf8("Imagens carregadas: 0"), body);
-	chat_layout->addWidget(image_status);
 	capture_status = new QLabel(body);
 	capture_status->setWordWrap(true);
 	sources_layout->addWidget(capture_status);
@@ -1146,8 +1133,6 @@ bool obs_module_load(void)
 				 }
 				 status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
 			 });
-	auto *test = new QPushButton(QString::fromUtf8("Testar painel"), body);
-	chat_layout->addWidget(test);
 	QObject::connect(
 		save, &QPushButton::clicked, body,
 		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
@@ -1189,19 +1174,6 @@ bool obs_module_load(void)
 	youtube->start(youtubeVideoId(inputs[2]->text()));
 	if (!channel->isEmpty())
 		connectChat();
-	QObject::connect(test, &QPushButton::clicked, body, []() {
-		appendChat("Twitch", "exemplo", "Olá, chat! Kappa",
-			   QJsonArray{QJsonObject{{"key", "premium/1"}, {"label", "Prime"}}},
-			   QJsonArray{QJsonObject{{"start", 11},
-						  {"end", 16},
-						  {"label", "Kappa"},
-						  {"url",
-						   "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"}}});
-		appendChat("Kick", "exemplo", "Bem-vindos! [emote:4148074:HYPERCLAP]",
-			   QJsonArray{QJsonObject{{"label", "Subscriber"}}},
-			   kickEmotes("Bem-vindos! [emote:4148074:HYPERCLAP]"));
-		appendChat("YouTube", "exemplo", "Mensagem de teste. 😃");
-	});
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
 		delete body;
 		overlay_checkbox = nullptr;
@@ -1232,7 +1204,6 @@ void obs_module_unload(void)
 	overlay_messages = QJsonArray();
 	panel_history.clear();
 	panel_view = nullptr;
-	image_status = nullptr;
 	capture_status = nullptr;
 	capture_state.clear();
 	if (asset_timer)
