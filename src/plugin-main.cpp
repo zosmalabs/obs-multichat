@@ -132,10 +132,13 @@ static void receiveCaptureTitle(const QString &title)
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
 			const int parsed = payload.value("parsed").toInt();
-			capture_state.insert(platform, parsed > 0
-				? QString::fromUtf8("leitor ativo (%1 mensagens identificadas)").arg(parsed)
-				: QString::fromUtf8("página aberta, nenhuma mensagem identificada (%1 linhas candidatas)")
-					.arg(payload.value("rows").toInt()));
+			capture_state.insert(
+				platform,
+				parsed > 0
+					? QString::fromUtf8("leitor ativo (%1 mensagens identificadas)").arg(parsed)
+					: QString::fromUtf8(
+						  "página aberta, nenhuma mensagem identificada (%1 linhas candidatas)")
+						  .arg(payload.value("rows").toInt()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -851,7 +854,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 		const bool created = !widget;
 		if (created) {
 			widget = capture_cef->create_widget(capture_window,
-						    platform == "TikTok" ? "about:blank" : url.toStdString());
+							    platform == "TikTok" ? "about:blank" : url.toStdString());
 			if (!widget)
 				return;
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
@@ -1289,4 +1292,3 @@ void obs_module_unload(void)
 		dock_registered = false;
 	}
 }
-
