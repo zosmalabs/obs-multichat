@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "youtube-client.h"
 
 #include <QJsonArray>
@@ -61,12 +65,13 @@ QString extract(const QString &page, const QRegularExpression &expression)
 QString messageText(const QJsonObject &renderer)
 {
 	QString text;
-	for (const QJsonValue &run : renderer.value("message").toObject().value("runs").toArray()) {
+	for (const QJsonValue run : renderer.value("message").toObject().value("runs").toArray()) {
 		QJsonObject item = run.toObject();
 		QString part = item.value("text").toString();
 		if (part.isEmpty()) {
 			QJsonObject emoji = item.value("emoji").toObject();
-			part = emoji.value("shortcuts").toArray().value(0).toString();
+			QJsonArray shortcuts = emoji.value("shortcuts").toArray();
+			part = shortcuts.isEmpty() ? QString() : shortcuts.at(0).toString();
 			if (part.isEmpty())
 				part = emoji.value("emojiId").toString();
 		}
@@ -142,7 +147,7 @@ void YouTubeClient::start(const QString &videoId)
 			int waitMs = 10000;
 			if (chat.error != CURLE_OK || chat.status != 200) {
 				++failures;
-				waitMs = std::min(60000, 10000 * failures);
+				waitMs = (std::min)(60000, 10000 * failures);
 				report(QString::fromUtf8("YouTube: falha na consulta (%1). Tentando novamente...")
 					       .arg(chat.status));
 			} else {
@@ -158,7 +163,7 @@ void YouTubeClient::start(const QString &videoId)
 					return;
 				}
 				failures = 0;
-				for (const QJsonValue &action : live.value("actions").toArray()) {
+				for (const QJsonValue action : live.value("actions").toArray()) {
 					QJsonObject item = action.toObject()
 								   .value("addChatItemAction")
 								   .toObject()
@@ -180,7 +185,9 @@ void YouTubeClient::start(const QString &videoId)
 				}
 				if (seen.size() > 3000)
 					seen.clear();
-				QJsonObject next = live.value("continuations").toArray().value(0).toObject();
+				QJsonArray continuations = live.value("continuations").toArray();
+				QJsonObject next = continuations.isEmpty() ? QJsonObject()
+									   : continuations.at(0).toObject();
 				QJsonObject token = next.value("invalidationContinuationData").toObject();
 				if (token.isEmpty())
 					token = next.value("timedContinuationData").toObject();
