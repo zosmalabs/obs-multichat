@@ -72,7 +72,7 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
 })())SCRIPT";
 
 static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
-  if (window.__zosmaTikTokCapture || !/(^|\.)tiktok\.com$/.test(location.hostname)) return;
+  if (window.top !== window.self || window.__zosmaTikTokCapture || !/(^|\.)tiktok\.com$/.test(location.hostname)) return;
   window.__zosmaTikTokCapture = true;
   const seen = new WeakMap();
   const pending = [];
@@ -109,7 +109,13 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
     if (rows.length) initialized = true;
     if (Date.now() - lastStatus > 5000) {
       lastStatus = Date.now();
-      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href});
+      const bodyText = (document.body?.innerText || '').slice(0, 1200).toLowerCase();
+      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href,
+        chatSurface:!!document.querySelector('[data-e2e="chat-room"], [data-e2e="live-chat-container"], [data-e2e="public-screen-live-chat-slot"], [class*="DivChatRoomContent"], .live-shared-ui-chat-list-scrolling-list'),
+        video:!!document.querySelector('video'),
+        login:!!document.querySelector('a[href*="/login"], button[data-e2e*="login"]') || /log in|sign in|entrar na conta/.test(bodyText),
+        verification:!!document.querySelector('[id*="captcha"], [class*="captcha"], iframe[src*="verify"]'),
+        visibility:document.visibilityState});
     }
   }
   const observer = new MutationObserver(() => {
