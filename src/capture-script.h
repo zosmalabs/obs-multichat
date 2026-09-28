@@ -81,6 +81,15 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   let lastAccount = '';
   let sequence = 0;
   const rowsSelector = '[data-e2e="chat-message"]';
+  function silenceMedia() {
+    for (const media of document.querySelectorAll('video, audio')) {
+      if (!media.muted) media.muted = true;
+      if (media.volume !== 0) media.volume = 0;
+    }
+  }
+  document.addEventListener('play', silenceMedia, true);
+  document.addEventListener('volumechange', silenceMedia, true);
+  setInterval(silenceMedia, 500);
   const enqueue = data => { if (pending.length < 100) pending.push(data); };
   setInterval(() => {
     if (!pending.length) return;
@@ -89,6 +98,7 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
     } catch (_) {}
   }, 130);
   function scan() {
+    silenceMedia();
     const profileLink = document.querySelector('a[data-e2e="profile-icon"][href*="/@"], a[data-e2e="profile-link"][href*="/@"], [data-e2e="profile-icon"] a[href*="/@"]');
     const profilePath = profileLink ? new URL(profileLink.href, location.href).pathname : location.pathname;
     const account = profilePath.match(/^\/@([A-Za-z0-9._]{2,30})\/?$/)?.[1] || '';
