@@ -316,7 +316,7 @@ static QImage platformIcon(const QString &platform)
 	const QColor color = platform == "Twitch"    ? QColor("#9146ff")
 			     : platform == "Kick"    ? QColor("#53b824")
 			     : platform == "YouTube" ? QColor("#ff0033")
-					     : QColor("#ee1d52");
+						     : QColor("#ee1d52");
 	painter.setPen(Qt::NoPen);
 	painter.setBrush(color);
 	painter.drawRoundedRect(QRectF(1, 1, 30, 30), 6, 6);
@@ -326,8 +326,9 @@ static QImage platformIcon(const QString &platform)
 	font.setPixelSize(23);
 	painter.setFont(font);
 	painter.drawText(icon.rect(), Qt::AlignCenter,
-			 platform == "YouTube" ? QString::fromUtf8("▶")
-					   : platform == "TikTok" ? QString::fromUtf8("♪") : platform.left(1));
+			 platform == "YouTube"  ? QString::fromUtf8("▶")
+			 : platform == "TikTok" ? QString::fromUtf8("♪")
+						: platform.left(1));
 	return icon;
 }
 
@@ -487,8 +488,10 @@ static void renderPanel()
 	QString html = "<html><body style='color:white;font-family:Arial;font-size:13px'>";
 	for (const QJsonObject &entry : panel_history) {
 		const QString platform = entry.value("platform").toString();
-		const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18"
-									       : platform == "TikTok" ? "#ee1d52" : "#ff0033";
+		const QString color = platform == "Twitch"   ? "#9146ff"
+				      : platform == "Kick"   ? "#53fc18"
+				      : platform == "TikTok" ? "#ee1d52"
+							     : "#ff0033";
 		const QUrl resource(QString("platform:%1").arg(platform.toLower()));
 		panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
 		html += QString("<p style='margin:4px 0'><img src='%1' width='18' height='18'> ")
@@ -611,8 +614,8 @@ static void receiveCapturedBadges(const QByteArray &bytes)
 	refreshOverlay();
 }
 
-static void appendChat(const QString &platform, const QString &name, const QString &message,
-		       const QJsonArray &badges, const QJsonArray &emotes)
+static void appendChat(const QString &platform, const QString &name, const QString &message, const QJsonArray &badges,
+		       const QJsonArray &emotes)
 {
 	QJsonObject entry;
 	entry.insert("platform", platform);
@@ -869,13 +872,12 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 	};
 	if (twitch != capture_twitch_channel || !twitch_capture) {
 		capture_twitch_channel = twitch;
-		update(twitch_capture, twitch, "https://www.twitch.tv/popout/" + twitch + "/chat?popout=", 0,
-		       "Twitch", capture_script);
+		update(twitch_capture, twitch, "https://www.twitch.tv/popout/" + twitch + "/chat?popout=", 0, "Twitch",
+		       capture_script);
 	}
 	if (kick != capture_kick_channel || !kick_capture) {
 		capture_kick_channel = kick;
-		update(kick_capture, kick, "https://kick.com/popout/" + kick + "/chat", 380, "Kick",
-		       capture_script);
+		update(kick_capture, kick, "https://kick.com/popout/" + kick + "/chat", 380, "Kick", capture_script);
 	}
 	if (tiktok != capture_tiktok_channel || !tiktok_capture) {
 		capture_tiktok_channel = tiktok;
