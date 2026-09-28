@@ -5,6 +5,7 @@
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -16,8 +17,6 @@
 #include <QHostAddress>
 #include <QHash>
 #include <QImage>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
 #include <QPainter>
 #include <QScrollBar>
 #include <QSet>
@@ -40,6 +39,7 @@
 #include "youtube-client.h"
 #include <QUrlQuery>
 #include <QStringList>
+#include <curl/curl.h>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -58,16 +58,30 @@ static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
-static QNetworkAccessManager *image_network = nullptr;
+static QPointer<QLabel> image_status;
 static QList<QJsonObject> panel_history;
 static QHash<QString, QImage> image_cache;
+static QHash<QString, QByteArray> image_bytes;
+static QHash<QString, QString> image_tokens;
+static QHash<QString, QString> token_urls;
 static QSet<QString> pending_images;
 static QSet<QString> failed_images;
 static QJsonObject twitch_badge_images;
 static QSet<QString> loaded_badge_catalogs;
 static QSet<QString> channel_badge_keys;
+struct AssetRequest {
+	CURL *handle = nullptr;
+	QByteArray bytes;
+	QString url;
+	QString room_id;
+	bool catalog = false;
+};
+static CURLM *asset_multi = nullptr;
+static QTimer *asset_timer = nullptr;
+static QHash<CURL *, AssetRequest *> asset_requests;
 
 static void renderPanel();
+static void requestChatImage(const QString &url);
 
 static QString cssColor(const QColor &color)
 {
@@ -84,6 +98,11 @@ static QByteArray overlayPayload()
 	payload.insert("limit", overlay_max_lines);
 	payload.insert("messages", overlay_messages);
 	payload.insert("badgeImages", twitch_badge_images);
+	QJsonObject assets;
+	for (auto it = image_tokens.cbegin(); it != image_tokens.cend(); ++it)
+		if (image_bytes.contains(it.key()))
+			assets.insert(it.key(), "/asset/" + it.value());
+	payload.insert("assets", assets);
 	payload.insert("fontSize", overlay_font_size);
 	payload.insert("nickColors", overlay_nick_colors);
 	payload.insert("cards", overlay_cards);
@@ -113,14 +132,15 @@ function draw(data){document.body.style.background=data.background;document.body
  const nick=document.createElement('span');nick.className='nick';nick.textContent=item.name+': ';
  row.append(badge);
  for(const role of item.badges||[]){const url=role.image||data.badgeImages[role.key];
-  if(url){const img=document.createElement('img');img.className='role-image';img.src=url;img.title=role.label;row.append(img)}
+  if(url){const img=document.createElement('img');img.className='role-image';img.src=data.assets[url]||url;img.title=role.label;
+   img.onerror=()=>img.replaceWith(document.createTextNode('['+role.label+']'));row.append(img)}
   else {const tag=document.createElement('span');tag.className='role';tag.textContent=role.label;row.append(tag)}
  }
  row.append(nick);
  const message=document.createElement('span');message.className='message';let offset=0;
  for(const emote of item.emotes||[]){if(emote.start<offset||emote.end>item.message.length)continue;
   message.append(document.createTextNode(item.message.slice(offset,emote.start)));
-  const img=document.createElement('img');img.className='emote';img.src=emote.url;img.alt=emote.label;img.title=emote.label;
+  const img=document.createElement('img');img.className='emote';img.src=data.assets[emote.url]||emote.url;img.alt=emote.label;img.title=emote.label;
   img.onerror=()=>img.replaceWith(document.createTextNode(emote.label));message.append(img);offset=emote.end;
  }
  message.append(document.createTextNode(item.message.slice(offset)));row.append(message);chat.append(row);
@@ -160,6 +180,24 @@ static bool startOverlayServer(QWidget *parent)
 					socket->setProperty("stream", true);
 					QObject::connect(socket, &QTcpSocket::disconnected, socket,
 							 &QObject::deleteLater);
+				} else if (request.startsWith("GET /asset/")) {
+					const QString token = QString::fromLatin1(request.mid(11, 64));
+					const QByteArray body = image_bytes.value(token_urls.value(token));
+					if (body.isEmpty()) {
+						socket->write(
+							"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+					} else {
+						const char *mime = body.startsWith("GIF8")       ? "image/gif"
+								   : body.startsWith("\x89PNG")  ? "image/png"
+								   : body.startsWith("\xff\xd8") ? "image/jpeg"
+								   : body.startsWith("RIFF")
+									   ? "image/webp"
+									   : "application/octet-stream";
+						socket->write("HTTP/1.1 200 OK\r\nContent-Type: " + QByteArray(mime) +
+							      "\r\nContent-Length: " + QByteArray::number(body.size()) +
+							      "\r\nConnection: close\r\n\r\n" + body);
+					}
+					socket->disconnectFromHost();
 				} else {
 					const QByteArray body(overlay_html);
 					socket->write(
@@ -212,31 +250,124 @@ static QImage platformIcon(const QString &platform)
 	return icon;
 }
 
+static size_t collectAsset(char *data, size_t size, size_t count, void *context)
+{
+	auto *request = static_cast<AssetRequest *>(context);
+	const size_t length = size * count;
+	if (request->bytes.size() + length > 2 * 1024 * 1024)
+		return 0;
+	request->bytes.append(data, static_cast<qsizetype>(length));
+	return length;
+}
+
+static void queueAsset(const QString &url, bool catalog = false, const QString &room_id = {})
+{
+	if (!asset_multi)
+		return;
+	auto *request = new AssetRequest;
+	request->url = url;
+	request->catalog = catalog;
+	request->room_id = room_id;
+	request->handle = curl_easy_init();
+	if (!request->handle) {
+		delete request;
+		return;
+	}
+	const QByteArray encoded = url.toUtf8();
+	curl_easy_setopt(request->handle, CURLOPT_URL, encoded.constData());
+	curl_easy_setopt(request->handle, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(request->handle, CURLOPT_CONNECTTIMEOUT, 5L);
+	curl_easy_setopt(request->handle, CURLOPT_TIMEOUT, 10L);
+	curl_easy_setopt(request->handle, CURLOPT_USERAGENT, "Mozilla/5.0 OBS-Multichat/0.8");
+	curl_easy_setopt(request->handle, CURLOPT_WRITEFUNCTION, collectAsset);
+	curl_easy_setopt(request->handle, CURLOPT_WRITEDATA, request);
+	asset_requests.insert(request->handle, request);
+	curl_multi_add_handle(asset_multi, request->handle);
+	asset_timer->start();
+}
+
+static void processBadgeCatalog(const QByteArray &bytes, const QString &room_id)
+{
+	const QJsonObject sets = QJsonDocument::fromJson(bytes).object().value("badge_sets").toObject();
+	for (auto set = sets.begin(); set != sets.end(); ++set) {
+		const QJsonObject versions = set.value().toObject().value("versions").toObject();
+		for (auto version = versions.begin(); version != versions.end(); ++version) {
+			const QString image = version.value().toObject().value("image_url_2x").toString();
+			const QString key = set.key() + "/" + version.key();
+			if (QUrl(image).host() == "static-cdn.jtvnw.net" &&
+			    (!room_id.isEmpty() || !channel_badge_keys.contains(key))) {
+				twitch_badge_images.insert(key, image);
+				if (!room_id.isEmpty())
+					channel_badge_keys.insert(key);
+			}
+		}
+	}
+	renderPanel();
+	refreshOverlay();
+}
+
+static void pollAssets()
+{
+	if (!asset_multi)
+		return;
+	int running = 0;
+	curl_multi_perform(asset_multi, &running);
+	int remaining = 0;
+	while (CURLMsg *result = curl_multi_info_read(asset_multi, &remaining)) {
+		if (result->msg != CURLMSG_DONE)
+			continue;
+		AssetRequest *request = asset_requests.take(result->easy_handle);
+		if (!request)
+			continue;
+		long status = 0;
+		curl_easy_getinfo(request->handle, CURLINFO_RESPONSE_CODE, &status);
+		const CURLcode curl_result = result->data.result;
+		curl_multi_remove_handle(asset_multi, request->handle);
+		curl_easy_cleanup(request->handle);
+		if (curl_result == CURLE_OK && status == 200) {
+			if (request->catalog) {
+				processBadgeCatalog(request->bytes, request->room_id);
+			} else {
+				QImage image;
+				if (image.loadFromData(request->bytes)) {
+					image_cache.insert(request->url, image);
+					image_bytes.insert(request->url, request->bytes);
+					renderPanel();
+					refreshOverlay();
+				} else
+					failed_images.insert(request->url);
+			}
+		} else if (!request->catalog)
+			failed_images.insert(request->url);
+		else if (image_status)
+			image_status->setText(QString::fromUtf8("Catálogo de badges da Twitch indisponível."));
+		if (!request->catalog)
+			pending_images.remove(request->url);
+		if (image_status && !request->catalog)
+			image_status->setText(QString::fromUtf8("Imagens carregadas: %1 · indisponíveis: %2")
+						      .arg(image_cache.size())
+						      .arg(failed_images.size()));
+		delete request;
+	}
+	if (asset_requests.isEmpty())
+		asset_timer->stop();
+}
+
 static void requestChatImage(const QString &url)
 {
-	if (!image_network || image_cache.contains(url) || pending_images.contains(url) ||
-	    failed_images.contains(url) || image_cache.size() + pending_images.size() >= 200)
+	if (!asset_multi || image_cache.contains(url) || pending_images.contains(url) || failed_images.contains(url) ||
+	    image_cache.size() + pending_images.size() >= 200)
 		return;
 	const QUrl parsed(url);
 	if (parsed.scheme() != "https" || (parsed.host() != "static-cdn.jtvnw.net" &&
 					   parsed.host() != "files.kick.com" && parsed.host() != "cdn.kick.com"))
 		return;
 	pending_images.insert(url);
-	QNetworkRequest request(parsed);
-	request.setTransferTimeout(7000);
-	QNetworkReply *reply = image_network->get(request);
-	QObject::connect(reply, &QNetworkReply::finished, reply, [reply, url]() {
-		pending_images.remove(url);
-		const QByteArray bytes = reply->readAll();
-		QImage image;
-		if (reply->error() == QNetworkReply::NoError && bytes.size() <= 1024 * 1024 &&
-		    image.loadFromData(bytes)) {
-			image_cache.insert(url, image);
-			renderPanel();
-		} else
-			failed_images.insert(url);
-		reply->deleteLater();
-	});
+	const QString token =
+		QString::fromLatin1(QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Sha256).toHex());
+	image_tokens.insert(url, token);
+	token_urls.insert(token, url);
+	queueAsset(url);
 }
 
 static QString panelImage(const QString &url, const QString &label, int height)
@@ -304,38 +435,13 @@ static void renderPanel()
 
 static void requestTwitchBadges(const QString &room_id)
 {
-	if (!image_network || loaded_badge_catalogs.contains(room_id) ||
+	if (!asset_multi || loaded_badge_catalogs.contains(room_id) ||
 	    (!room_id.isEmpty() && !QRegularExpression("^[0-9]+$").match(room_id).hasMatch()))
 		return;
 	loaded_badge_catalogs.insert(room_id);
 	const QUrl url("https://badges.twitch.tv/v1/badges/" +
 		       (room_id.isEmpty() ? QString("global") : QString("channels/") + room_id) + "/display");
-	QNetworkRequest request(url);
-	request.setTransferTimeout(8000);
-	QNetworkReply *reply = image_network->get(request);
-	QObject::connect(reply, &QNetworkReply::finished, reply, [reply, room_id]() {
-		if (reply->error() == QNetworkReply::NoError) {
-			const QJsonObject sets =
-				QJsonDocument::fromJson(reply->readAll()).object().value("badge_sets").toObject();
-			for (auto set = sets.begin(); set != sets.end(); ++set) {
-				const QJsonObject versions = set.value().toObject().value("versions").toObject();
-				for (auto version = versions.begin(); version != versions.end(); ++version) {
-					const QJsonObject details = version.value().toObject();
-					const QString image = details.value("image_url_2x").toString();
-					const QString key = set.key() + "/" + version.key();
-					if (QUrl(image).host() == "static-cdn.jtvnw.net" &&
-					    (!room_id.isEmpty() || !channel_badge_keys.contains(key))) {
-						twitch_badge_images.insert(key, image);
-						if (!room_id.isEmpty())
-							channel_badge_keys.insert(key);
-					}
-				}
-			}
-			renderPanel();
-			refreshOverlay();
-		}
-		reply->deleteLater();
-	});
+	queueAsset(url.toString(), true, room_id);
 }
 
 static bool attachOverlay()
@@ -626,7 +732,11 @@ bool obs_module_load(void)
 	layout->addWidget(save);
 	auto *messages = new QTextBrowser(body);
 	panel_view = messages;
-	image_network = new QNetworkAccessManager(body);
+	curl_global_init(CURL_GLOBAL_DEFAULT);
+	asset_multi = curl_multi_init();
+	asset_timer = new QTimer(body);
+	asset_timer->setInterval(80);
+	QObject::connect(asset_timer, &QTimer::timeout, body, pollAssets);
 	requestTwitchBadges({});
 	messages->setOpenExternalLinks(false);
 	messages->setPlaceholderText(
@@ -638,6 +748,8 @@ bool obs_module_load(void)
 		QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
 			.arg(panel_background.name()));
 	layout->addWidget(messages);
+	image_status = new QLabel(QString::fromUtf8("Imagens carregadas: 0"), body);
+	layout->addWidget(image_status);
 	auto *appearance = new QGroupBox(QString::fromUtf8("Aparência"), body);
 	auto *appearance_form = new QFormLayout(appearance);
 	auto *font_size = new QSpinBox(appearance);
@@ -901,8 +1013,23 @@ void obs_module_unload(void)
 	overlay_messages = QJsonArray();
 	panel_history.clear();
 	panel_view = nullptr;
-	image_network = nullptr;
+	image_status = nullptr;
+	if (asset_timer)
+		asset_timer->stop();
+	for (AssetRequest *request : asset_requests) {
+		curl_multi_remove_handle(asset_multi, request->handle);
+		curl_easy_cleanup(request->handle);
+		delete request;
+	}
+	asset_requests.clear();
+	if (asset_multi)
+		curl_multi_cleanup(asset_multi);
+	asset_multi = nullptr;
+	asset_timer = nullptr;
 	image_cache.clear();
+	image_bytes.clear();
+	image_tokens.clear();
+	token_urls.clear();
 	pending_images.clear();
 	failed_images.clear();
 	twitch_badge_images = QJsonObject();
