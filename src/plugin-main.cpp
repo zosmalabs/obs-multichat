@@ -5,6 +5,9 @@
 
 #include <QCheckBox>
 #include <QDesktopServices>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QUrl>
 #include <QColorDialog>
@@ -114,6 +117,16 @@ static void showCaptureState()
 						     capture_state.value("TikTok", "aguardando")));
 }
 
+static void logTikTokBrowser(const QString &event)
+{
+	const QString path = TikTokClient::logPath();
+	QDir().mkpath(QFileInfo(path).absolutePath());
+	QFile file(path);
+	if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+		file.write(
+			(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs) + " UTC " + event + "\n").toUtf8());
+}
+
 static void receiveCaptureTitle(const QString &title)
 {
 	if (!title.startsWith("zosma:") || title.size() > 100000)
@@ -124,6 +137,7 @@ static void receiveCaptureTitle(const QString &title)
 	if (platform != "Twitch" && platform != "Kick" && platform != "TikTok")
 		return;
 	if (platform == "TikTok" && payload.value("type").toString() == "chat") {
+		logTikTokBrowser("Mensagem recebida pelo navegador oculto");
 		appendChat(platform, payload.value("name").toString(), payload.value("message").toString());
 		return;
 	}
@@ -135,6 +149,8 @@ static void receiveCaptureTitle(const QString &title)
 			capture_state.insert(platform,
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
 		} else if (platform == "TikTok") {
+			logTikTokBrowser(
+				QString("Navegador oculto: %1 linhas visiveis").arg(payload.value("rows").toInt()));
 			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
 							       .arg(payload.value("rows").toInt()));
 		} else {
@@ -697,7 +713,7 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 		if (overlay_server)
 			overlay_server->close();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-		startCapture(capture_twitch_channel, capture_kick_channel, QString());
+		startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
 		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
 			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat Web ativa na cena atual."));
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
@@ -851,14 +867,25 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 		}
 		const bool created = !widget;
 		if (created) {
+			if (platform == "TikTok") {
+				QDir().mkpath(QFileInfo(TikTokClient::logPath()).absolutePath());
+				QFile(TikTokClient::logPath()).open(QIODevice::WriteOnly | QIODevice::Truncate);
+				logTikTokBrowser("Iniciando captura em navegador oculto");
+			}
 			widget = capture_cef->create_widget(capture_window, url.toStdString());
-			if (!widget)
+			if (!widget) {
+				if (platform == "TikTok")
+					logTikTokBrowser("Falha ao criar navegador oculto");
 				return;
+			}
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
 					 [](const QString &title) { receiveCaptureTitle(title); });
 			QObject::connect(widget, &QCefWidget::urlChanged, capture_window,
 					 [platform](const QString &loaded) {
 						 if (loaded != "about:blank") {
+							 if (platform == "TikTok")
+								 logTikTokBrowser(QString("Pagina carregada: %1")
+											  .arg(QUrl(loaded).host()));
 							 capture_state.insert(
 								 platform, loaded.startsWith("data:")
 										   ? "falha ao carregar página"
@@ -1199,7 +1226,7 @@ bool obs_module_load(void)
 			 });
 	QObject::connect(
 		save, &QPushButton::clicked, body,
-		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube, tiktok]() {
+		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
 			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
 			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
 			QSettings settings("Zosma", "OBS Multichat");
@@ -1219,8 +1246,7 @@ bool obs_module_load(void)
 			*channel = twitchChannel(inputs[0]->text());
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
-			startCapture(*channel, kick_name, QString());
-			tiktok->start(tiktokChannel(inputs[3]->text()));
+			startCapture(*channel, kick_name, tiktokChannel(inputs[3]->text()));
 			youtube->start(youtubeVideoId(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
@@ -1239,7 +1265,6 @@ bool obs_module_load(void)
 	capture_tiktok_channel = tiktokChannel(inputs[3]->text());
 	kick->start(capture_kick_channel);
 	youtube->start(youtubeVideoId(inputs[2]->text()));
-	tiktok->start(capture_tiktok_channel);
 	if (!channel->isEmpty())
 		connectChat();
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
@@ -1253,11 +1278,12 @@ bool obs_module_load(void)
 	capture_retry->setInterval(6000);
 	QObject::connect(capture_retry, &QTimer::timeout, body, []() {
 		if ((!capture_twitch_channel.isEmpty() && !twitch_capture) ||
-		    (!capture_kick_channel.isEmpty() && !kick_capture))
-			startCapture(capture_twitch_channel, capture_kick_channel, QString());
+		    (!capture_kick_channel.isEmpty() && !kick_capture) ||
+		    (!capture_tiktok_channel.isEmpty() && !tiktok_capture))
+			startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
 	});
 	capture_retry->start();
-	startCapture(capture_twitch_channel, capture_kick_channel, QString());
+	startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
 	dock_registered = true;
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	obs_log(LOG_INFO, "Multichat test dock loaded");
