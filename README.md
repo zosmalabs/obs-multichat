@@ -17,9 +17,12 @@ do YouTube aceita a URL de uma live ou do chat, lê o identificador da live
 e consulta as mensagens sem login, respeitando o tempo sugerido pela própria
 plataforma. A interface usada pelo YouTube não é pública e pode mudar. TikTok
 ainda está pendente. Ao marcar Exibir na transmissão, o plugin cria uma fonte
-de texto Zosma Multichat na cena atual e nas cenas usadas depois. O OBS
-salva a fonte nas cenas. A aparência da fonte pode ser ajustada nas
-propriedades e transformações da própria fonte no OBS.
+de navegador Zosma Multichat Web na cena atual e nas cenas usadas depois.
+Ela recebe as mensagens de um servidor HTTP acessível somente em 127.0.0.1,
+dentro do plugin, e mostra até o número de linhas escolhido no painel.
+O OBS salva a fonte nas cenas e o plugin atualiza seu endereço local ao reiniciar.
+A fonte de texto anterior Zosma Multichat é removida na primeira ativação
+da fonte de navegador.
 
 Quando o Qt no OBS não disponibiliza TLS, a conexão de leitura pública da
 Twitch usa o endpoint IRC sem TLS na porta 6667. O painel informa quando
@@ -38,9 +41,7 @@ usa o pacote extraível para facilitar a substituição dos arquivos.
 
 ## Próximas etapas
 
-Implementar captura em segundo plano para outras plataformas, identidade
-visual e fonte de cena. Entradas previstas: Twitch e Kick (@canal ou URL do
-chat), YouTube (URL da live ou chat), TikTok (@usuário ou URL da live).
+Implementar a captura do TikTok e opções adicionais de aparência para o chat.
 
 Este projeto inclui código e infraestrutura derivados do template oficial
 https://github.com/obsproject/obs-plugintemplate sob a licença em LICENSE.
