@@ -106,7 +106,7 @@ void KickClient::start(const QString &channel)
 							receive.clear();
 							break;
 						}
-						if (frame && frame->bytesleft == 0 && (frame->flags & CURLWS_TEXT)) {
+						if (frame && frame->bytesleft == 0 && !receive.empty()) {
 							QJsonObject event = QJsonDocument::fromJson(
 										    QByteArray::fromStdString(receive))
 										    .object();
