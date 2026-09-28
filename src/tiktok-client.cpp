@@ -213,9 +213,7 @@ PollResponse parseResponse(const std::string &data)
 QString roomIdFromHtml(const std::string &html)
 {
 	const QString page = QString::fromUtf8(html);
-	for (const QString &pattern : {QStringLiteral(R"("roomId":"?(\d+)"?)"),
-				       QStringLiteral(R"("room_id":"?(\d+)"?)")}) {
-		const QRegularExpressionMatch match = QRegularExpression(pattern).match(page);
+\tfor (const QString &pattern : {QStringLiteral("\\\"roomId\\\":\\\"?(\\\\d+)\\\"?"),\n\t\t\t\t       QStringLiteral("\\\"room_id\\\":\\\"?(\\\\d+)\\\"?")}) {\n	const QRegularExpressionMatch match = QRegularExpression(pattern).match(page);
 		if (match.hasMatch())
 			return match.captured(1);
 	}
