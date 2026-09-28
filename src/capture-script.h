@@ -43,9 +43,10 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       if (!name) continue;
       const badgeRoot = platform === 'Kick' ? row.querySelector('.chat-message-identity') || nameNode.parentElement || row : row;
       const badgeNodes = [...badgeRoot.querySelectorAll(badgeSelector)].filter(n =>
-        !n.closest('button, .chat-entry-content, .chat-line__message--emote') &&
-        (platform !== 'Kick' || n.tagName.toLowerCase() === 'svg' ||
-         /\/chat\/badges\/|\/channel_subscriber_badges\//.test(n.currentSrc || n.src || '')));
+        platform === 'Twitch' ||
+        (!n.closest('button, .chat-entry-content, .chat-line__message--emote') &&
+         (n.tagName.toLowerCase() === 'svg' ||
+          /\/chat\/badges\/|\/channel_subscriber_badges\//.test(n.currentSrc || n.src || ''))));
       if (!badgeNodes.length) continue;
       found += badgeNodes.length;
       const signature = badgeNodes.map(n => n.outerHTML).join('|');
