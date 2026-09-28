@@ -95,6 +95,22 @@ static void requestChatImage(const QString &url);
 static void receiveCapturedBadges(const QByteArray &bytes);
 static void startCapture(const QString &twitch, const QString &kick);
 
+static void stopCapture()
+{
+	if (capture_window) {
+		if (twitch_capture)
+			twitch_capture->closeBrowser();
+		if (kick_capture)
+			kick_capture->closeBrowser();
+		delete capture_window;
+	}
+	twitch_capture = nullptr;
+	kick_capture = nullptr;
+	capture_window = nullptr;
+	delete capture_cef;
+	capture_cef = nullptr;
+}
+
 static QString cssColor(const QColor &color)
 {
 	return QString("rgba(%1,%2,%3,%4)")
@@ -668,8 +684,7 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 {
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
 		shutting_down = true;
-		if (capture_window)
-			capture_window->close();
+		stopCapture();
 		if (overlay_server)
 			overlay_server->close();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
@@ -1196,17 +1211,7 @@ void obs_module_unload(void)
 	image_status = nullptr;
 	if (asset_timer)
 		asset_timer->stop();
-	if (capture_window) {
-		if (twitch_capture)
-			twitch_capture->closeBrowser();
-		if (kick_capture)
-			kick_capture->closeBrowser();
-		delete capture_window;
-	}
-	twitch_capture = nullptr;
-	kick_capture = nullptr;
-	capture_window = nullptr;
-	capture_cef = nullptr;
+	stopCapture();
 	captured_badges.clear();
 	for (AssetRequest *request : asset_requests) {
 		curl_multi_remove_handle(asset_multi, request->handle);
