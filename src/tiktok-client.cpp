@@ -99,6 +99,7 @@ void TikTokClient::start(const QString &channel)
 			report(QString::fromUtf8("TikTok: conectando a @%1...").arg(channel));
 			const std::string url =
 				"wss://ws.eulerstream.com/?uniqueId=" + channel.toStdString() +
+				"&apiKey=euler_ZjE0MTMwMWJiMGJkZmI3OTFjMWM0NDI2ZTk0MWEzZmQwODY5NGQwMTMyMWU1MWM3NzBjMzkz"
 				"&features.bundleEvents=false&features.rawMessages=false"
 				"&features.normalizeUniqueId=true&features.schemaVersion=v2"
 				"&features.webcastPlatform=web";
@@ -113,7 +114,7 @@ void TikTokClient::start(const QString &channel)
 			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response);
 			if (result == CURLE_OK) {
 				retrySeconds = 3;
-				report(QString::fromUtf8("TikTok: conectado a @%1. Aguardando comentários.")
+				report(QString::fromUtf8("TikTok: conexão estabelecida com @%1. Aguardando comentários.")
 					       .arg(channel));
 				std::string frame;
 				while (!cancelled) {
@@ -125,8 +126,11 @@ void TikTokClient::start(const QString &channel)
 						std::this_thread::sleep_for(std::chrono::milliseconds(60));
 						continue;
 					}
-					if (result != CURLE_OK)
+					if (result != CURLE_OK) {
+						report(QString::fromUtf8("TikTok: conexão interrompida (%1). Reconectando...")
+						       .arg(curl_easy_strerror(result)));
 						break;
+					}
 					if (length)
 						frame.append(bytes, length);
 					if (!meta || meta->bytesleft != 0)
