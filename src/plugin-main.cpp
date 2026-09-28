@@ -8,6 +8,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
+#include <QSpinBox>
 #include <QTextBrowser>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -29,6 +30,19 @@ static obs_source_t *overlay_source = nullptr;
 static QCheckBox *overlay_checkbox = nullptr;
 static QLabel *overlay_status = nullptr;
 static QStringList overlay_lines;
+static int overlay_max_lines = 8;
+
+static void refreshOverlay()
+{
+	if (!overlay_source)
+		return;
+	const QString visible = overlay_lines.mid(qMax(0, overlay_lines.size() - overlay_max_lines)).join('\n');
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "text",
+			    visible.isEmpty() ? "Multichat pronto. Aguardando mensagens..." : visible.toUtf8().constData());
+	obs_source_update(overlay_source, settings);
+	obs_data_release(settings);
+}
 
 static bool attachOverlay()
 {
@@ -63,6 +77,7 @@ static bool attachOverlay()
 		obs_scene_add(scene, overlay_source);
 	if (overlay_source)
 		obs_source_set_enabled(overlay_source, true);
+	refreshOverlay();
 	obs_source_release(scene_source);
 	return overlay_source != nullptr;
 }
@@ -72,14 +87,10 @@ static void updateOverlay(const QString &platform, const QString &name, const QS
 	QString text = QString("%1 · %2: %3").arg(platform, name, message);
 	text.replace('\n', ' ').replace('\r', ' ');
 	overlay_lines.append(text.left(200));
-	while (overlay_lines.size() > 8)
+	while (overlay_lines.size() > 50)
 		overlay_lines.removeFirst();
-	if (overlay_source && overlay_checkbox && overlay_checkbox->isChecked()) {
-		obs_data_t *settings = obs_data_create();
-		obs_data_set_string(settings, "text", overlay_lines.join('\n').toUtf8().constData());
-		obs_source_update(overlay_source, settings);
-		obs_data_release(settings);
-	}
+	if (overlay_checkbox && overlay_checkbox->isChecked())
+		refreshOverlay();
 }
 
 static void frontendEvent(enum obs_frontend_event event, void *)
@@ -206,6 +217,18 @@ bool obs_module_load(void)
 	overlay_checkbox = overlay;
 	overlay->setChecked(settings.value("overlay", false).toBool());
 	layout->addWidget(overlay);
+	overlay_max_lines = qBound(1, settings.value("overlay_max_lines", 8).toInt(), 30);
+	auto *max_lines = new QSpinBox(body);
+	max_lines->setRange(1, 30);
+	max_lines->setValue(overlay_max_lines);
+	max_lines->setSuffix(QString::fromUtf8(" linhas"));
+	form->addRow(QString::fromUtf8("Linhas na transmissão"), max_lines);
+	QObject::connect(max_lines, qOverload<int>(&QSpinBox::valueChanged), body, [](int count) {
+		overlay_max_lines = count;
+		QSettings settings("Zosma", "OBS Multichat");
+		settings.setValue("overlay_max_lines", count);
+		refreshOverlay();
+	});
 	overlay_status = new QLabel(QString::fromUtf8("Fonte de texto nas cenas usadas durante a live."), body);
 	overlay_status->setWordWrap(true);
 	layout->addWidget(overlay_status);
