@@ -694,7 +694,7 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 		if (overlay_server)
 			overlay_server->close();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-		startCapture(capture_twitch_channel, capture_kick_channel, QString());
+		startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
 		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
 			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat Web ativa na cena atual."));
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
@@ -1227,7 +1227,7 @@ bool obs_module_load(void)
 	capture_tiktok_channel = tiktokChannel(inputs[3]->text());
 	kick->start(capture_kick_channel);
 	youtube->start(youtubeVideoId(inputs[2]->text()));
-	tiktok->start(capture_tiktok_channel);
+	tiktok->start(QString());
 	if (!channel->isEmpty())
 		connectChat();
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
