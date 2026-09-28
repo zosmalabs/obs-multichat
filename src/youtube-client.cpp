@@ -125,7 +125,7 @@ void YouTubeClient::start(const QString &source)
 		return;
 	cancelled = false;
 	worker = std::thread([this, source] {
-		const bool followChannel = source.startsWith('@') || (source.size() == 24 && source.startsWith("UC"));
+		const bool followChannel = source.startsWith("https://www.youtube.com/");
 		auto report = [this](QString text) {
 			QMetaObject::invokeMethod(this, [this, text] { emit status(text); }, Qt::QueuedConnection);
 		};
@@ -141,13 +141,19 @@ void YouTubeClient::start(const QString &source)
 			QString videoId = source;
 			Response page;
 			if (followChannel) {
-				const QString route = source.startsWith('@') ? source + "/live"
-									     : "channel/" + source + "/live";
-				const QUrl channelUrl("https://www.youtube.com/" + route);
+				const QUrl channelUrl(source);
 				page = request(channelUrl.toEncoded().toStdString());
 				if (cancelled)
 					return;
 				videoId = redirectedVideoId(page.effectiveUrl);
+				if (videoId.isEmpty() && page.status == 200) {
+					const QString channelHtml = QString::fromUtf8(page.body.data(), page.body.size());
+					if (channelHtml.contains(QRegularExpression("[\\\"']isLiveNow[\\\"']\\s*:\\s*true")) ||
+					    channelHtml.contains("liveChatRenderer")) {
+						videoId = extract(channelHtml, QRegularExpression(
+							"[\\\"']videoId[\\\"']\\s*:\\s*[\\\"']([A-Za-z0-9_-]{11})[\\\"']"));
+					}
+				}
 				if (page.error != CURLE_OK || page.status != 200) {
 					report(QString::fromUtf8(
 						"YouTube: falha ao consultar o canal. Nova tentativa em 30 segundos."));
@@ -160,6 +166,7 @@ void YouTubeClient::start(const QString &source)
 					wait(30000);
 					continue;
 				}
+				page = request("https://www.youtube.com/watch?v=" + videoId.toStdString());
 				report(QString::fromUtf8("YouTube: LIVE encontrada (%1). Abrindo o chat...")
 					       .arg(videoId));
 			} else {
