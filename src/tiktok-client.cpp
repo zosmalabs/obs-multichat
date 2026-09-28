@@ -320,7 +320,8 @@ static void logTikTok(const QString &event)
 static QString httpSummary(const HttpInfo &info, size_t bytes)
 {
 	return QString("HTTP %1, curl %2, tipo %3, %4 bytes")
-		.arg(info.status).arg(static_cast<int>(info.curlCode))
+		.arg(info.status)
+		.arg(static_cast<int>(info.curlCode))
 		.arg(info.contentType.isEmpty() ? QStringLiteral("ausente") : info.contentType)
 		.arg(bytes);
 }
@@ -352,7 +353,7 @@ void TikTokClient::start(const QString &channel)
 		QFile file(logPath());
 		QDir().mkpath(QFileInfo(logPath()).absolutePath());
 		if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
-			file.write("OBS Multichat TikTok - diagnostico. Sem cookies, URLs assinadas ou mensagens.\\n");
+			file.write("OBS Multichat TikTok - diagnostico. Sem cookies, URLs assinadas ou mensagens.\n");
 	}
 	logTikTok(QString("Inicio: canal @%1").arg(channel));
 	worker = std::thread([this, channel] {
@@ -429,9 +430,11 @@ void TikTokClient::start(const QString &channel)
 							if (!needsSigning && signInitialUrl(rawUrl, url, cookies) &&
 							    httpGet(url, body, &cookies, &info)) {
 								needsSigning = true;
-								logTikTok("Polling assinado: " + httpSummary(info, body.size()));
+								logTikTok("Polling assinado: " +
+									  httpSummary(info, body.size()));
 							} else {
-								logTikTok("Polling recusado: " + httpSummary(info, body.size()));
+								logTikTok("Polling recusado: " +
+									  httpSummary(info, body.size()));
 								report(QString::fromUtf8(
 									       "TikTok: polling recusado: %1. Reconectando...")
 									       .arg(describeResponse(body, info)));
@@ -439,9 +442,12 @@ void TikTokClient::start(const QString &channel)
 							}
 						}
 						const PollResponse response = parseResponse(body);
-						logTikTok(QString("Resposta: cursor=%1, extensao=%2, eventos=%3, tentativa_vazia=%4")
-								.arg(!response.cursor.empty()).arg(!response.internalExt.empty())
-								.arg(response.messages.size()).arg(emptyResponses + 1));
+						logTikTok(
+							QString("Resposta: cursor=%1, extensao=%2, eventos=%3, tentativa_vazia=%4")
+								.arg(!response.cursor.empty())
+								.arg(!response.internalExt.empty())
+								.arg(response.messages.size())
+								.arg(emptyResponses + 1));
 						if (response.cursor.empty() && response.messages.empty()) {
 							++emptyResponses;
 							report(QString::fromUtf8(
