@@ -84,6 +84,7 @@ static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
 static QPointer<QLabel> capture_status_twitch;
 static QPointer<QLabel> capture_status_kick;
+static QPointer<QLabel> capture_status_tiktok;
 static QList<QJsonObject> panel_history;
 static QHash<QString, QImage> image_cache;
 static QHash<QString, QByteArray> image_bytes;
@@ -98,9 +99,11 @@ static QHash<QString, QJsonArray> captured_badges;
 static QPointer<QWidget> capture_window;
 static QPointer<QCefWidget> twitch_capture;
 static QPointer<QCefWidget> kick_capture;
+static QPointer<QCefWidget> tiktok_capture;
 static QCef *capture_cef = nullptr;
 static QString capture_twitch_channel;
 static QString capture_kick_channel;
+static QString capture_tiktok_url;
 #ifdef _WIN32
 static QPointer<QObject> notification_owner;
 static UINT notification_device = WAVE_MAPPER;
@@ -178,7 +181,7 @@ public:
 protected:
 	void closeEvent(QCloseEvent *event) override
 	{
-		setGeometry(-3000, -3000, 800, 600);
+		setGeometry(-3000, -3000, 2000, 850);
 		event->ignore();
 	}
 };
@@ -199,7 +202,7 @@ static void requestChatImage(const QString &url);
 static void receiveCapturedBadges(const QByteArray &bytes);
 static void appendChat(const QString &platform, const QString &name, const QString &message,
 		       const QJsonArray &badges = {}, const QJsonArray &emotes = {});
-static void startCapture(const QString &twitch, const QString &kick);
+static void startCapture(const QString &twitch, const QString &kick, const QString &tiktok);
 
 static void showCaptureState()
 {
@@ -209,6 +212,8 @@ static void showCaptureState()
 	if (capture_status_kick)
 		capture_status_kick->setText(QString::fromUtf8("Badges: %1")
 						    .arg(capture_state.value("Kick", "aguardando")));
+	if (capture_status_tiktok)
+		capture_status_tiktok->setText(capture_state.value("TikTok", QString::fromUtf8("Aguardando página...")));
 }
 
 static void receiveCaptureTitle(const QString &title)
@@ -218,8 +223,27 @@ static void receiveCaptureTitle(const QString &title)
 	const QByteArray bytes = QByteArray::fromBase64(title.mid(6).toLatin1());
 	const QJsonObject payload = QJsonDocument::fromJson(bytes).object();
 	const QString platform = payload.value("platform").toString();
-	if (platform != "Twitch" && platform != "Kick")
+	if (platform != "Twitch" && platform != "Kick" && platform != "TikTok")
 		return;
+	if (platform == "TikTok") {
+		const QUrl url(payload.value("url").toString());
+		if (url.host() != "www.tiktok.com" && url.host() != "tiktok.com")
+			return;
+		if (payload.value("type").toString() == "message") {
+			const QString name = payload.value("name").toString();
+			const QString message = payload.value("message").toString();
+			if (!name.isEmpty() && !message.isEmpty()) {
+				appendChat("TikTok", name, message);
+				capture_state.insert("TikTok", QString::fromUtf8("TikTok: recebendo mensagens."));
+			}
+		} else if (capture_state.value("TikTok") != QString::fromUtf8("TikTok: recebendo mensagens.")) {
+			capture_state.insert("TikTok", payload.value("rows").toInt() > 0
+							? QString::fromUtf8("TikTok: chat visível, aguardando novas mensagens.")
+							: QString::fromUtf8("TikTok: página aberta, procurando comentários."));
+		}
+		showCaptureState();
+		return;
+	}
 	if (payload.value("type").toString() == "status") {
 		const QString url = payload.value("url").toString();
 		if (QUrl(url).host() != "kick.com" && QUrl(url).host() != "www.kick.com" &&
@@ -244,10 +268,13 @@ static void stopCapture()
 			twitch_capture->closeBrowser();
 		if (kick_capture)
 			kick_capture->closeBrowser();
+		if (tiktok_capture)
+			tiktok_capture->closeBrowser();
 		delete capture_window;
 	}
 	twitch_capture = nullptr;
 	kick_capture = nullptr;
+	tiktok_capture = nullptr;
 	capture_window = nullptr;
 	delete capture_cef;
 	capture_cef = nullptr;
@@ -291,8 +318,8 @@ html,body{margin:0;overflow:hidden;font:32px Arial,sans-serif;color:#fff;backgro
 .emote{height:1.15em;vertical-align:middle;object-fit:contain}
 .nick{color:var(--nick-color);font-weight:700}.message{white-space:pre-wrap}
 </style><div id="chat"></div><script>
-const colors={Twitch:'#9146ff',Kick:'#53fc18',YouTube:'#ff0033'};
-const badges={Twitch:'T',Kick:'K',YouTube:'▶'};
+const colors={Twitch:'#9146ff',Kick:'#53fc18',YouTube:'#ff0033',TikTok:'#ee1d52'};
+const badges={Twitch:'T',Kick:'K',YouTube:'▶',TikTok:'♪'};
 const chat=document.getElementById('chat');
 function draw(data){document.body.style.background=data.background;document.body.style.fontSize=data.fontSize+'px';
  chat.classList.toggle('cards',data.cards);chat.replaceChildren();for(const item of data.messages.slice(-data.limit)){
@@ -416,7 +443,8 @@ static QImage platformIcon(const QString &platform)
 	font.setPixelSize(23);
 	painter.setFont(font);
 	painter.drawText(icon.rect(), Qt::AlignCenter,
-			 platform == "YouTube" ? QString::fromUtf8("▶") : platform.left(1));
+			 platform == "YouTube" ? QString::fromUtf8("▶")
+			 : platform == "TikTok" ? QString::fromUtf8("♪") : platform.left(1));
 	return icon;
 }
 
@@ -570,7 +598,8 @@ static QString panelEntryHtml(const QJsonObject &entry)
 {
 	QString html;
 	const QString platform = entry.value("platform").toString();
-	const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18" : "#ff0033";
+		const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18"
+						       : platform == "TikTok" ? "#ee1d52" : "#ff0033";
 	const QUrl resource(QString("platform:%1").arg(platform.toLower()));
 	panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
 	html += QString("<p style='margin:4px 0;color:white;font-family:Arial;font-size:13px'><img src='%1' width='18' height='18'> ")
@@ -803,7 +832,7 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 		if (overlay_server)
 			overlay_server->close();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-		startCapture(capture_twitch_channel, capture_kick_channel);
+		startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_url);
 		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
 			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat Web ativa na cena atual."));
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
@@ -900,6 +929,12 @@ static bool validSource(int platform, const QString &value)
 	const QString input = value.trimmed();
 	if (input.isEmpty())
 		return true;
+	if (platform == 3) {
+		const QUrl url(input);
+		const QString host = url.host().toLower();
+		return url.scheme() == "https" && (host == "tiktok.com" || host == "www.tiktok.com") &&
+		       QRegularExpression("^/@[A-Za-z0-9._]{2,24}/live/?$").match(url.path()).hasMatch();
+	}
 	if (platform == 2)
 		return !youtubeSource(input).isEmpty();
 	if (platform == 0 || platform == 1) {
@@ -923,9 +958,9 @@ static bool validSource(int platform, const QString &value)
 	return false;
 }
 
-static void startCapture(const QString &twitch, const QString &kick)
+static void startCapture(const QString &twitch, const QString &kick, const QString &tiktok)
 {
-	if (shutting_down || !overlay_server || (!capture_window && twitch.isEmpty() && kick.isEmpty()))
+	if (shutting_down || !overlay_server || (!capture_window && twitch.isEmpty() && kick.isEmpty() && tiktok.isEmpty()))
 		return;
 	if (!capture_cef) {
 		obs_module_t *module = obs_get_module("obs-browser");
@@ -945,7 +980,7 @@ static void startCapture(const QString &twitch, const QString &kick)
 		return;
 	if (!capture_window) {
 		capture_window = new CaptureWindow(nullptr, Qt::Tool | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
-		capture_window->setWindowTitle(QString::fromUtf8("Captura de badges · feche para ocultar"));
+		capture_window->setWindowTitle(QString::fromUtf8("Captura dos chats · feche para ocultar"));
 		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
 		capture_window->setGeometry(-3000, -3000, 2000, 850);
 		capture_window->show();
@@ -977,7 +1012,7 @@ static void startCapture(const QString &twitch, const QString &kick)
 							 showCaptureState();
 						 }
 					 });
-			widget->setGeometry(x, 0, 380, 600);
+			widget->setGeometry(x, 0, platform == "TikTok" ? 440 : 380, 650);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
 			widget->show();
@@ -993,6 +1028,10 @@ static void startCapture(const QString &twitch, const QString &kick)
 	if (kick != capture_kick_channel || !kick_capture) {
 		capture_kick_channel = kick;
 		update(kick_capture, kick, "https://kick.com/popout/" + kick + "/chat", 380, "Kick", capture_script);
+	}
+	if (tiktok != capture_tiktok_url || !tiktok_capture) {
+		capture_tiktok_url = tiktok;
+		update(tiktok_capture, tiktok, tiktok, 760, "TikTok", tiktok_capture_script);
 	}
 }
 
@@ -1013,10 +1052,10 @@ bool obs_module_load(void)
 	tabs->addTab(sources_page, QString::fromUtf8("Fontes"));
 	tabs->addTab(appearance_page, QString::fromUtf8("Aparência"));
 	layout->addWidget(tabs);
-	constexpr const char *keys[] = {"twitch", "kick", "youtube"};
-	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube"};
-	QLineEdit *inputs[3];
-	QLabel *platform_status[3];
+	constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
+	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube", "TikTok (teste)"};
+	QLineEdit *inputs[4];
+	QLabel *platform_status[4];
 	QSettings settings("Zosma", "OBS Multichat");
 	overlay_font_size = qBound(16, settings.value("overlay_font_size", 32).toInt(), 64);
 	overlay_nick_colors = settings.value("overlay_nick_colors", true).toBool();
@@ -1024,10 +1063,11 @@ bool obs_module_load(void)
 	overlay_background = QColor(settings.value("overlay_background", "#00000000").toString());
 	if (!overlay_background.isValid())
 		overlay_background = QColor(0, 0, 0, 0);
-	for (int i = 0; i < 3; ++i) {
+	for (int i = 0; i < 4; ++i) {
 		inputs[i] = new QLineEdit(body);
-		inputs[i]->setPlaceholderText(i == 2 ? QString::fromUtf8("@canal, canal, ID, link do canal ou da live")
-					     : QString::fromUtf8("@canal ou link popup do chat"));
+		inputs[i]->setPlaceholderText(i == 3 ? QString::fromUtf8("https://www.tiktok.com/@canal/live")
+					     : i == 2 ? QString::fromUtf8("@canal, canal, ID, link do canal ou da live")
+						      : QString::fromUtf8("@canal ou link popup do chat"));
 		inputs[i]->setText(settings.value(keys[i]).toString());
 		auto *field = new QWidget(body);
 		auto *field_layout = new QVBoxLayout(field);
@@ -1048,6 +1088,8 @@ bool obs_module_load(void)
 			else
 				capture_status_kick = badge_status;
 		}
+		if (i == 3)
+			capture_status_tiktok = platform_status[i];
 		form->addRow(labels[i], field);
 	}
 	sources_layout->addLayout(form);
@@ -1058,6 +1100,8 @@ bool obs_module_load(void)
 				  "<b>YouTube:</b> digite o nome do canal com ou sem @, o ID do canal (UC...), "
 				  "cole o link do canal ou o link direto da live. "
 				  "Com um canal, o plugin procura a live ativa automaticamente.<br>"
+				  "<b>TikTok (teste):</b> cole a URL da live. A página é aberta no navegador interno "
+				  "do OBS, com o vídeo silenciado.<br>"
 				  "Depois clique em Salvar para conectar os chats."), sources_page);
 	source_help->setWordWrap(true);
 	sources_layout->addWidget(source_help);
@@ -1103,6 +1147,15 @@ bool obs_module_load(void)
 	});
 	auto *save = new QPushButton(QString::fromUtf8("Salvar fontes"), body);
 	sources_layout->addWidget(save);
+	auto *show_tiktok_capture = new QPushButton(QString::fromUtf8("Mostrar página do TikTok (login/verificação)"), body);
+	sources_layout->addWidget(show_tiktok_capture);
+	QObject::connect(show_tiktok_capture, &QPushButton::clicked, body, []() {
+		if (capture_window && tiktok_capture) {
+			capture_window->setGeometry(80, 80, 1210, 720);
+			capture_window->raise();
+			capture_window->activateWindow();
+		}
+	});
 	auto *messages = new QTextBrowser(body);
 	panel_view = messages;
 	auto *clear_messages = new QPushButton(QString::fromUtf8("Limpar mensagens"), chat_page);
@@ -1423,16 +1476,16 @@ bool obs_module_load(void)
 	QObject::connect(
 		save, &QPushButton::clicked, body,
 		[inputs, platform_status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
-			constexpr const char *names[] = {"Twitch", "Kick", "YouTube"};
-			constexpr const char *keys[] = {"twitch", "kick", "youtube"};
+			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
+			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
 			QSettings settings("Zosma", "OBS Multichat");
-			for (int i = 0; i < 3; ++i) {
+			for (int i = 0; i < 4; ++i) {
 				if (!validSource(i, inputs[i]->text())) {
 					platform_status[i]->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
 					return;
 				}
 			}
-			for (int i = 0; i < 3; ++i)
+			for (int i = 0; i < 4; ++i)
 				settings.setValue(keys[i], inputs[i]->text().trimmed());
 			settings.sync();
 			if (settings.status() != QSettings::NoError) {
@@ -1440,14 +1493,14 @@ bool obs_module_load(void)
 					label->setText(QString::fromUtf8("Falha ao salvar as fontes."));
 				return;
 			}
-			for (int i = 0; i < 3; ++i)
+			for (int i = 0; i < 4; ++i)
 				platform_status[i]->setText(inputs[i]->text().trimmed().isEmpty()
 								    ? QString::fromUtf8("Não configurada")
 								    : QString::fromUtf8("Conectando..."));
 			*channel = twitchChannel(inputs[0]->text());
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
-			startCapture(*channel, kick_name);
+			startCapture(*channel, kick_name, inputs[3]->text().trimmed());
 			youtube->start(youtubeSource(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
@@ -1459,6 +1512,7 @@ bool obs_module_load(void)
 	*channel = twitchChannel(inputs[0]->text());
 	capture_twitch_channel = *channel;
 	capture_kick_channel = kickChannel(inputs[1]->text());
+	capture_tiktok_url = inputs[3]->text().trimmed();
 	kick->start(capture_kick_channel);
 	youtube->start(youtubeSource(inputs[2]->text()));
 	if (!channel->isEmpty())
@@ -1474,11 +1528,12 @@ bool obs_module_load(void)
 	capture_retry->setInterval(6000);
 	QObject::connect(capture_retry, &QTimer::timeout, body, []() {
 		if ((!capture_twitch_channel.isEmpty() && !twitch_capture) ||
-		    (!capture_kick_channel.isEmpty() && !kick_capture))
-			startCapture(capture_twitch_channel, capture_kick_channel);
+		    (!capture_kick_channel.isEmpty() && !kick_capture) ||
+		    (!capture_tiktok_url.isEmpty() && !tiktok_capture))
+			startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_url);
 	});
 	capture_retry->start();
-	startCapture(capture_twitch_channel, capture_kick_channel);
+	startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_url);
 	dock_registered = true;
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	obs_log(LOG_INFO, "Multichat test dock loaded");
@@ -1500,6 +1555,7 @@ void obs_module_unload(void)
 #endif
 	capture_status_twitch = nullptr;
 	capture_status_kick = nullptr;
+	capture_status_tiktok = nullptr;
 	capture_state.clear();
 	// OBS_FRONTEND_EVENT_EXIT already closes browser widgets while Qt is alive.
 	// Do not inspect QPointers again after the frontend has torn them down.
