@@ -842,10 +842,10 @@ static QString youtubeSource(const QString &input)
 			   QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(parts[1]).hasMatch())
 			return "https://www.youtube.com/channel/" + parts[1] + "/live";
 	}
-	if (QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(source).hasMatch() ||
-	    QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(source).hasMatch())
-		return source.startsWith('@') ? "https://www.youtube.com/" + source + "/live"
-					     : "https://www.youtube.com/channel/" + source + "/live";
+	if (QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(source).hasMatch())
+		return "https://www.youtube.com/channel/" + source + "/live";
+	if (QRegularExpression("^@?[\\p{L}\\p{N}_.-]{3,30}$").match(source).hasMatch())
+		return "https://www.youtube.com/" + (source.startsWith('@') ? source : "@" + source) + "/live";
 	return youtubeVideoId(source);
 }
 
@@ -1007,7 +1007,8 @@ bool obs_module_load(void)
 		overlay_background = QColor(0, 0, 0, 0);
 	for (int i = 0; i < 3; ++i) {
 		inputs[i] = new QLineEdit(body);
-		inputs[i]->setPlaceholderText(i == 2 ? "Link do canal (@ ou ID) ou link da live" : "@canal ou link");
+		inputs[i]->setPlaceholderText(i == 2 ? QString::fromUtf8("@canal, canal, ID, link do canal ou da live")
+					     : QString::fromUtf8("@canal ou link popup do chat"));
 		inputs[i]->setText(settings.value(keys[i]).toString());
 		auto *field = new QWidget(body);
 		auto *field_layout = new QVBoxLayout(field);
@@ -1031,6 +1032,16 @@ bool obs_module_load(void)
 		form->addRow(labels[i], field);
 	}
 	sources_layout->addLayout(form);
+	auto *source_help = new QLabel(
+		QString::fromUtf8("<b>Como preencher</b><br>"
+				  "<b>Twitch e Kick:</b> digite @canal ou cole o link do popup do chat. "
+				  "Exemplo: @meucanal.<br>"
+				  "<b>YouTube:</b> digite o nome do canal com ou sem @, o ID do canal (UC...), "
+				  "cole o link do canal ou o link direto da live. "
+				  "Com um canal, o plugin procura a live ativa automaticamente.<br>"
+				  "Depois clique em Salvar para conectar os chats."), sources_page);
+	source_help->setWordWrap(true);
+	sources_layout->addWidget(source_help);
 	auto *overlay = new QCheckBox(QString::fromUtf8("Exibir na transmissão"), body);
 	overlay_checkbox = overlay;
 	overlay->setChecked(settings.value("overlay", false).toBool());
