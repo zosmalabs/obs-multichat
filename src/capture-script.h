@@ -70,3 +70,52 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
   setInterval(scan, 8000);
 })())SCRIPT";
+
+static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
+  if (window.__zosmaTikTokCapture || !/(^|\.)tiktok\.com$/.test(location.hostname)) return;
+  window.__zosmaTikTokCapture = true;
+  let sequence = 0;
+  const seen = new Set();
+  function report(payload) {
+    try {
+      document.title = 'zosma:' + btoa(unescape(encodeURIComponent(JSON.stringify({
+        platform: 'TikTok', sequence: ++sequence, ...payload
+      }))));
+    } catch (_) {}
+  }
+  function mute() {
+    for (const media of document.querySelectorAll('video, audio')) {
+      media.muted = true;
+      media.volume = 0;
+    }
+  }
+  let lastStatus = 0;
+  function scan() {
+    mute();
+    const rows = [...document.querySelectorAll('[data-e2e="chat-message"]')].slice(-40);
+    for (const row of rows) {
+      const name = row.querySelector('[data-e2e="message-owner-name"]')?.textContent?.trim();
+      const message = row.querySelector('[class*="break-words"][class*="align-middle"]')?.textContent?.trim();
+      if (!name || !message) continue;
+      const index = row.closest('[data-index]')?.getAttribute('data-index') || '';
+      const key = index + ':' + name + ':' + message;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (seen.size > 500) seen.delete(seen.values().next().value);
+      report({type:'message',name:name.slice(0,80),message:message.slice(0,500),url:location.href});
+    }
+    if (Date.now() - lastStatus > 5000) {
+      lastStatus = Date.now();
+      report({type:'status',rows:rows.length,url:location.href});
+    }
+  }
+  let timer;
+  function start() {
+    new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(scan, 120); })
+      .observe(document.documentElement, {subtree:true,childList:true});
+    scan();
+    setInterval(scan, 1500);
+  }
+  if (document.documentElement) start();
+  else document.addEventListener('DOMContentLoaded', start, {once:true});
+})())SCRIPT";
