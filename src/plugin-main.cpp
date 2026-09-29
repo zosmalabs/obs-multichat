@@ -1093,6 +1093,14 @@ bool obs_module_load(void)
 	sources_layout->addWidget(save);
 	auto *messages = new QTextBrowser(body);
 	panel_view = messages;
+	auto *clear_messages = new QPushButton(QString::fromUtf8("Limpar mensagens"), chat_page);
+	chat_layout->addWidget(clear_messages);
+	QObject::connect(clear_messages, &QPushButton::clicked, body, []() {
+		panel_history.clear();
+		if (panel_render_timer)
+			panel_render_timer->stop();
+		renderPanel();
+	});
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 	asset_multi = curl_multi_init();
 	asset_timer = new QTimer(body);
