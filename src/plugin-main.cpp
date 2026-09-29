@@ -1249,11 +1249,14 @@ bool obs_module_load(void)
 	QObject::connect(youtube, &YouTubeClient::status, body,
 			 [platform_status](const QString &message) { platform_status[2]->setText(message); });
 	QObject::connect(youtube, &YouTubeClient::message, body,
-			 [](const QString &name, const QString &message) { appendChat("YouTube", name, message); });
+			 [platform_status](const QString &name, const QString &message) {
+				 appendChat("YouTube", name, message);
+				 platform_status[2]->setText(QString::fromUtf8("YouTube: recebendo mensagens."));
+			 });
 	QObject::connect(kick, &KickClient::status, body,
 			 [platform_status](const QString &message) { platform_status[1]->setText(message); });
 	QObject::connect(kick, &KickClient::message, body,
-			 [](const QString &name, const QString &message, const QJsonArray &raw_badges) {
+			 [platform_status](const QString &name, const QString &message, const QJsonArray &raw_badges) {
 				 QJsonArray badges;
 				 for (const QJsonValue value : raw_badges) {
 					 const QJsonObject badge = value.toObject();
@@ -1269,6 +1272,7 @@ bool obs_module_load(void)
 					 badges.append(display);
 				 }
 				 appendChat("Kick", name, message, badges, kickEmotes(message));
+				 platform_status[1]->setText(QString::fromUtf8("Kick: recebendo mensagens."));
 			 });
 	auto *socket = new QSslSocket(body);
 	auto *retry = new QTimer(body);
@@ -1306,7 +1310,7 @@ bool obs_module_load(void)
 		if (*plainMode)
 			joinChat();
 	});
-	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer]() {
+	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer, platform_status]() {
 		buffer->append(socket->readAll());
 		if (buffer->size() > 65536)
 			buffer->clear();
@@ -1354,6 +1358,7 @@ bool obs_module_load(void)
 				badges.append(QJsonObject{{"key", key}, {"label", key.section('/', 0, 0)}});
 			}
 			appendChat("Twitch", name, message, badges, twitchEmotes(message, tags_map.value("emotes")));
+			platform_status[0]->setText(QString::fromUtf8("Twitch: recebendo mensagens."));
 		}
 	});
 	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, platform_status]() {
