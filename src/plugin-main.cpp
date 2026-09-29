@@ -81,7 +81,8 @@ static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
-static QPointer<QLabel> capture_status;
+static QPointer<QLabel> capture_status_twitch;
+static QPointer<QLabel> capture_status_kick;
 static QList<QJsonObject> panel_history;
 static QHash<QString, QImage> image_cache;
 static QHash<QString, QByteArray> image_bytes;
@@ -201,10 +202,12 @@ static void startCapture(const QString &twitch, const QString &kick);
 
 static void showCaptureState()
 {
-	if (capture_status)
-		capture_status->setText(QString::fromUtf8("Captura · Twitch: %1 · Kick: %2")
-						.arg(capture_state.value("Twitch", "aguardando"),
-						     capture_state.value("Kick", "aguardando")));
+	if (capture_status_twitch)
+		capture_status_twitch->setText(QString::fromUtf8("Badges: %1")
+						      .arg(capture_state.value("Twitch", "aguardando")));
+	if (capture_status_kick)
+		capture_status_kick->setText(QString::fromUtf8("Badges: %1")
+						    .arg(capture_state.value("Kick", "aguardando")));
 }
 
 static void receiveCaptureTitle(const QString &title)
@@ -836,7 +839,7 @@ static QString youtubeSource(const QString &input)
 		    QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(parts[0]).hasMatch())
 			return "https://www.youtube.com/" + parts[0] + "/live";
 		if (parts.size() == 2 && parts[0] == "channel" &&
-		    QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(parts[1]).hasMatch())
+			   QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(parts[1]).hasMatch())
 			return "https://www.youtube.com/channel/" + parts[1] + "/live";
 	}
 	if (QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(source).hasMatch() ||
@@ -994,6 +997,7 @@ bool obs_module_load(void)
 	constexpr const char *keys[] = {"twitch", "kick", "youtube"};
 	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube"};
 	QLineEdit *inputs[3];
+	QLabel *platform_status[3];
 	QSettings settings("Zosma", "OBS Multichat");
 	overlay_font_size = qBound(16, settings.value("overlay_font_size", 32).toInt(), 64);
 	overlay_nick_colors = settings.value("overlay_nick_colors", true).toBool();
@@ -1005,7 +1009,26 @@ bool obs_module_load(void)
 		inputs[i] = new QLineEdit(body);
 		inputs[i]->setPlaceholderText(i == 2 ? "Link do canal (@ ou ID) ou link da live" : "@canal ou link");
 		inputs[i]->setText(settings.value(keys[i]).toString());
-		form->addRow(labels[i], inputs[i]);
+		auto *field = new QWidget(body);
+		auto *field_layout = new QVBoxLayout(field);
+		field_layout->setContentsMargins(0, 0, 0, 6);
+		field_layout->setSpacing(3);
+		field_layout->addWidget(inputs[i]);
+		platform_status[i] = new QLabel(inputs[i]->text().trimmed().isEmpty()
+							 ? QString::fromUtf8("Não configurada")
+							 : QString::fromUtf8("Aguardando conexão..."), field);
+		platform_status[i]->setWordWrap(true);
+		field_layout->addWidget(platform_status[i]);
+		if (i < 2) {
+			auto *badge_status = new QLabel(field);
+			badge_status->setWordWrap(true);
+			field_layout->addWidget(badge_status);
+			if (i == 0)
+				capture_status_twitch = badge_status;
+			else
+				capture_status_kick = badge_status;
+		}
+		form->addRow(labels[i], field);
 	}
 	sources_layout->addLayout(form);
 	auto *overlay = new QCheckBox(QString::fromUtf8("Exibir na transmissão"), body);
@@ -1048,9 +1071,6 @@ bool obs_module_load(void)
 				overlay_status->setText(QString::fromUtf8("Exibição na transmissão desativada."));
 		}
 	});
-	auto *status = new QLabel(QString::fromUtf8("Configure as fontes para o primeiro teste."), body);
-	status->setWordWrap(true);
-	sources_layout->addWidget(status);
 	auto *save = new QPushButton(QString::fromUtf8("Salvar fontes"), body);
 	sources_layout->addWidget(save);
 	auto *messages = new QTextBrowser(body);
@@ -1070,9 +1090,6 @@ bool obs_module_load(void)
 		QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
 			.arg(panel_background.name()));
 	chat_layout->addWidget(messages);
-	capture_status = new QLabel(body);
-	capture_status->setWordWrap(true);
-	sources_layout->addWidget(capture_status);
 	sources_layout->addStretch();
 	showCaptureState();
 	auto *appearance = new QGroupBox(QString::fromUtf8("Personalização"), appearance_page);
@@ -1230,11 +1247,11 @@ bool obs_module_load(void)
 	auto *kick = new KickClient(body);
 	auto *youtube = new YouTubeClient(body);
 	QObject::connect(youtube, &YouTubeClient::status, body,
-			 [status](const QString &message) { status->setText(message); });
+			 [platform_status](const QString &message) { platform_status[2]->setText(message); });
 	QObject::connect(youtube, &YouTubeClient::message, body,
 			 [](const QString &name, const QString &message) { appendChat("YouTube", name, message); });
 	QObject::connect(kick, &KickClient::status, body,
-			 [status](const QString &message) { status->setText(message); });
+			 [platform_status](const QString &message) { platform_status[1]->setText(message); });
 	QObject::connect(kick, &KickClient::message, body,
 			 [](const QString &name, const QString &message, const QJsonArray &raw_badges) {
 				 QJsonArray badges;
@@ -1264,22 +1281,22 @@ bool obs_module_load(void)
 		delete buffer;
 		delete plainMode;
 	});
-	auto connectChat = [socket, channel, plainMode, status]() {
+	auto connectChat = [socket, channel, plainMode, platform_status]() {
 		if (channel->isEmpty() || socket->state() != QAbstractSocket::UnconnectedState)
 			return;
-		status->setText(QString::fromUtf8("Twitch: conectando a #%1...").arg(*channel));
+		platform_status[0]->setText(QString::fromUtf8("Twitch: conectando a #%1...").arg(*channel));
 		if (*plainMode)
 			socket->connectToHost("irc.chat.twitch.tv", 6667);
 		else
 			socket->connectToHostEncrypted("irc.chat.twitch.tv", 6697);
 	};
 	QObject::connect(retry, &QTimer::timeout, socket, connectChat);
-	auto joinChat = [socket, channel, status, plainMode]() {
+	auto joinChat = [socket, channel, platform_status, plainMode]() {
 		socket->write("CAP REQ :twitch.tv/tags twitch.tv/commands\r\n");
 		socket->write("NICK justinfan" +
 			      QByteArray::number(QRandomGenerator::global()->bounded(100000, 999999)) + "\r\n");
 		socket->write("JOIN #" + channel->toUtf8() + "\r\n");
-		status->setText(
+		platform_status[0]->setText(
 			*plainMode ? QString::fromUtf8("Twitch: conectado a #%1 sem TLS. Aguardando mensagens.")
 					     .arg(*channel)
 				   : QString::fromUtf8("Twitch: conectado a #%1. Aguardando mensagens.").arg(*channel));
@@ -1339,35 +1356,35 @@ bool obs_module_load(void)
 			appendChat("Twitch", name, message, badges, twitchEmotes(message, tags_map.value("emotes")));
 		}
 	});
-	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, status]() {
+	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, platform_status]() {
 		if (!channel->isEmpty()) {
-			status->setText(QString::fromUtf8("Twitch: desconectado. Reconectando..."));
+			platform_status[0]->setText(QString::fromUtf8("Twitch: desconectado. Reconectando..."));
 			retry->start(5000);
 		}
 	});
 	QObject::connect(socket, &QSslSocket::errorOccurred, body,
-			 [socket, status, plainMode, retry](QAbstractSocket::SocketError) {
+			 [socket, platform_status, plainMode, retry](QAbstractSocket::SocketError) {
 				 if (!*plainMode && (!QSslSocket::supportsSsl() ||
 						     socket->errorString().contains("TLS initialization failed",
 										    Qt::CaseInsensitive))) {
 					 *plainMode = true;
-					 status->setText(QString::fromUtf8(
+					 platform_status[0]->setText(QString::fromUtf8(
 						 "Twitch: TLS indisponível. Tentando conexão de leitura sem TLS..."));
 					 socket->abort();
 					 retry->start(100);
 					 return;
 				 }
-				 status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
+				 platform_status[0]->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
 			 });
 	QObject::connect(
 		save, &QPushButton::clicked, body,
-		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
+		[inputs, platform_status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
 			constexpr const char *names[] = {"Twitch", "Kick", "YouTube"};
 			constexpr const char *keys[] = {"twitch", "kick", "youtube"};
 			QSettings settings("Zosma", "OBS Multichat");
 			for (int i = 0; i < 3; ++i) {
 				if (!validSource(i, inputs[i]->text())) {
-					status->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
+					platform_status[i]->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
 					return;
 				}
 			}
@@ -1375,9 +1392,14 @@ bool obs_module_load(void)
 				settings.setValue(keys[i], inputs[i]->text().trimmed());
 			settings.sync();
 			if (settings.status() != QSettings::NoError) {
-				status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
+				for (auto *label : platform_status)
+					label->setText(QString::fromUtf8("Falha ao salvar as fontes."));
 				return;
 			}
+			for (int i = 0; i < 3; ++i)
+				platform_status[i]->setText(inputs[i]->text().trimmed().isEmpty()
+								    ? QString::fromUtf8("Não configurada")
+								    : QString::fromUtf8("Conectando..."));
 			*channel = twitchChannel(inputs[0]->text());
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
@@ -1388,9 +1410,6 @@ bool obs_module_load(void)
 			socket->abort();
 			if (!channel->isEmpty()) {
 				connectChat();
-			} else if (inputs[1]->text().trimmed().isEmpty() && inputs[2]->text().trimmed().isEmpty()) {
-				status->setText(QString::fromUtf8(
-					"Fontes salvas. Preencha Twitch para iniciar a captura real."));
 			}
 		});
 	*channel = twitchChannel(inputs[0]->text());
@@ -1435,7 +1454,8 @@ void obs_module_unload(void)
 #else
 	notification_sound = nullptr;
 #endif
-	capture_status = nullptr;
+	capture_status_twitch = nullptr;
+	capture_status_kick = nullptr;
 	capture_state.clear();
 	// OBS_FRONTEND_EVENT_EXIT already closes browser widgets while Qt is alive.
 	// Do not inspect QPointers again after the frontend has torn them down.
