@@ -29,6 +29,7 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QTextDocument>
+#include <QTextOption>
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
@@ -191,7 +192,6 @@ struct AssetRequest {
 };
 static CURLM *asset_multi = nullptr;
 static QTimer *asset_timer = nullptr;
-static QTimer *panel_render_timer = nullptr;
 static QHash<CURL *, AssetRequest *> asset_requests;
 
 static void renderPanel();
@@ -566,35 +566,40 @@ static QString panelMessageHtml(const QJsonObject &entry)
 	return result + message.mid(offset).toHtmlEscaped();
 }
 
+static QString panelEntryHtml(const QJsonObject &entry)
+{
+	QString html;
+	const QString platform = entry.value("platform").toString();
+	const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18" : "#ff0033";
+	const QUrl resource(QString("platform:%1").arg(platform.toLower()));
+	panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
+	html += QString("<p style='margin:4px 0;color:white;font-family:Arial;font-size:13px'><img src='%1' width='18' height='18'> ")
+			.arg(resource.toString());
+	for (const QJsonValue value : entry.value("badges").toArray()) {
+		const QJsonObject badge = value.toObject();
+		const QString label = badge.value("label").toString();
+		QString url = badge.value("image").toString();
+		if (url.isEmpty())
+			url = twitch_badge_images.value(badge.value("key").toString()).toString();
+		if (!url.isEmpty())
+			html += panelImage(url, label, 17) + " ";
+		else
+			html += QString("<span style='color:#cccccc'>[%1]</span> ").arg(label.toHtmlEscaped());
+	}
+	html += QString("<b style='color:%1'>%2:</b> %3</p>")
+			.arg(color, entry.value("name").toString().toHtmlEscaped(), panelMessageHtml(entry));
+	return html;
+}
 static void renderPanel()
 {
 	if (!panel_view)
 		return;
 	auto *scroll = panel_view->verticalScrollBar();
-	const bool at_bottom = scroll->value() >= scroll->maximum() - 24;
+	const bool at_bottom = scroll->value() >= scroll->maximum() - 2;
 	const int previous = scroll->value();
-	QString html = "<html><body style='color:white;font-family:Arial;font-size:13px'>";
-	for (const QJsonObject &entry : panel_history) {
-		const QString platform = entry.value("platform").toString();
-		const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18" : "#ff0033";
-		const QUrl resource(QString("platform:%1").arg(platform.toLower()));
-		panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
-		html += QString("<p style='margin:4px 0'><img src='%1' width='18' height='18'> ")
-				.arg(resource.toString());
-		for (const QJsonValue value : entry.value("badges").toArray()) {
-			const QJsonObject badge = value.toObject();
-			const QString label = badge.value("label").toString();
-			QString url = badge.value("image").toString();
-			if (url.isEmpty())
-				url = twitch_badge_images.value(badge.value("key").toString()).toString();
-			if (!url.isEmpty())
-				html += panelImage(url, label, 17) + " ";
-			else
-				html += QString("<span style='color:#cccccc'>[%1]</span> ").arg(label.toHtmlEscaped());
-		}
-		html += QString("<b style='color:%1'>%2:</b> %3</p>")
-				.arg(color, entry.value("name").toString().toHtmlEscaped(), panelMessageHtml(entry));
-	}
+	QString html = "<html><body>";
+	for (const QJsonObject &entry : panel_history)
+		html += panelEntryHtml(entry);
 	// Replacing the document briefly resets its scroll position. Keep that
 	// intermediate state off screen so the dock does not flash at the bottom.
 	panel_view->setUpdatesEnabled(false);
@@ -717,10 +722,17 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 	while (overlay_messages.size() > 50)
 		overlay_messages.removeAt(0);
 	panel_history.append(entry);
-	while (panel_history.size() > 100)
-		panel_history.removeFirst();
-	if (panel_render_timer && !panel_render_timer->isActive())
-		panel_render_timer->start(80);
+	if (panel_history.size() > 200) {
+		while (panel_history.size() > 100)
+			panel_history.removeFirst();
+		renderPanel();
+	} else if (panel_view) {
+		auto *scroll = panel_view->verticalScrollBar();
+		const bool at_bottom = scroll->value() >= scroll->maximum() - 2;
+		const int previous = scroll->value();
+		panel_view->append(panelEntryHtml(entry));
+		scroll->setValue(at_bottom ? scroll->maximum() : previous);
+	}
 	const qint64 now = QDateTime::currentMSecsSinceEpoch();
 	if (notification_enabled && now - last_notification_ms >= 1500) {
 		playNotification();
@@ -1097,8 +1109,6 @@ bool obs_module_load(void)
 	chat_layout->addWidget(clear_messages);
 	QObject::connect(clear_messages, &QPushButton::clicked, body, []() {
 		panel_history.clear();
-		if (panel_render_timer)
-			panel_render_timer->stop();
 		renderPanel();
 	});
 	curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -1106,10 +1116,10 @@ bool obs_module_load(void)
 	asset_timer = new QTimer(body);
 	asset_timer->setInterval(80);
 	QObject::connect(asset_timer, &QTimer::timeout, body, pollAssets);
-	panel_render_timer = new QTimer(body);
-	panel_render_timer->setSingleShot(true);
-	QObject::connect(panel_render_timer, &QTimer::timeout, body, renderPanel);
 	messages->setOpenExternalLinks(false);
+	messages->setLineWrapMode(QTextEdit::WidgetWidth);
+	messages->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+	messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	messages->setPlaceholderText(
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
 	QColor panel_background(settings.value("panel_background", "#161922").toString());
@@ -1509,7 +1519,6 @@ void obs_module_unload(void)
 		curl_multi_cleanup(asset_multi);
 	asset_multi = nullptr;
 	asset_timer = nullptr;
-	panel_render_timer = nullptr;
 	image_cache.clear();
 	image_bytes.clear();
 	image_tokens.clear();
