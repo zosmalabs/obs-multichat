@@ -76,6 +76,8 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   window.__zosmaTikTokCapture = true;
   let sequence = 0;
   const seen = new Set();
+  const rowSignatures = new WeakMap();
+  const recentMessages = new Map();
   function report(payload) {
     try {
       document.title = 'zosma:' + btoa(unescape(encodeURIComponent(JSON.stringify({
@@ -97,11 +99,24 @@ static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
       const name = row.querySelector('[data-e2e="message-owner-name"]')?.textContent?.trim();
       const message = row.querySelector('[class*="break-words"][class*="align-middle"]')?.textContent?.trim();
       if (!name || !message) continue;
+      const signature = name + ':' + message;
+      // The virtualized list changes data-index while mounting its first rows.
+      // Do not treat an index change on the same row as a new comment.
+      if (rowSignatures.get(row) === signature) continue;
+      rowSignatures.set(row, signature);
       const index = row.closest('[data-index]')?.getAttribute('data-index') || '';
       const key = index + ':' + name + ':' + message;
       if (seen.has(key)) continue;
       seen.add(key);
       if (seen.size > 500) seen.delete(seen.values().next().value);
+      const now = Date.now();
+      const lastSeen = recentMessages.get(signature);
+      recentMessages.set(signature, now);
+      for (const [text, time] of recentMessages) {
+        if (now - time > 3000) recentMessages.delete(text);
+      }
+      // Also handle a row replaced by React during the initial chat render.
+      if (lastSeen !== undefined && now - lastSeen < 3000) continue;
       report({type:'message',name:name.slice(0,80),message:message.slice(0,500),url:location.href});
     }
     if (Date.now() - lastStatus > 5000) {
