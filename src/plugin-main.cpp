@@ -191,6 +191,7 @@ struct AssetRequest {
 };
 static CURLM *asset_multi = nullptr;
 static QTimer *asset_timer = nullptr;
+static QTimer *panel_render_timer = nullptr;
 static QHash<CURL *, AssetRequest *> asset_requests;
 
 static void renderPanel();
@@ -718,7 +719,8 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 	panel_history.append(entry);
 	while (panel_history.size() > 100)
 		panel_history.removeFirst();
-	renderPanel();
+	if (panel_render_timer && !panel_render_timer->isActive())
+		panel_render_timer->start(80);
 	const qint64 now = QDateTime::currentMSecsSinceEpoch();
 	if (notification_enabled && now - last_notification_ms >= 1500) {
 		playNotification();
@@ -1096,6 +1098,9 @@ bool obs_module_load(void)
 	asset_timer = new QTimer(body);
 	asset_timer->setInterval(80);
 	QObject::connect(asset_timer, &QTimer::timeout, body, pollAssets);
+	panel_render_timer = new QTimer(body);
+	panel_render_timer->setSingleShot(true);
+	QObject::connect(panel_render_timer, &QTimer::timeout, body, renderPanel);
 	messages->setOpenExternalLinks(false);
 	messages->setPlaceholderText(
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
@@ -1496,6 +1501,7 @@ void obs_module_unload(void)
 		curl_multi_cleanup(asset_multi);
 	asset_multi = nullptr;
 	asset_timer = nullptr;
+	panel_render_timer = nullptr;
 	image_cache.clear();
 	image_bytes.clear();
 	image_tokens.clear();
