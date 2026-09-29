@@ -594,8 +594,13 @@ static void renderPanel()
 		html += QString("<b style='color:%1'>%2:</b> %3</p>")
 				.arg(color, entry.value("name").toString().toHtmlEscaped(), panelMessageHtml(entry));
 	}
+	// Replacing the document briefly resets its scroll position. Keep that
+	// intermediate state off screen so the dock does not flash at the bottom.
+	panel_view->setUpdatesEnabled(false);
 	panel_view->setHtml(html + "</body></html>");
-	scroll->setValue(at_bottom ? scroll->maximum() : previous);
+	panel_view->document()->adjustSize();
+	scroll->setValue(at_bottom ? scroll->maximum() : qMin(previous, scroll->maximum()));
+	panel_view->setUpdatesEnabled(true);
 }
 
 static bool attachOverlay()
