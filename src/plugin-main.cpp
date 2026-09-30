@@ -195,9 +195,16 @@ struct AssetRequest {
 };
 static CURLM *asset_multi = nullptr;
 static QTimer *asset_timer = nullptr;
+static QTimer *panel_refresh_timer = nullptr;
+static QTimer *overlay_refresh_timer = nullptr;
 static QHash<CURL *, AssetRequest *> asset_requests;
 
 static void renderPanel();
+static void schedulePanelRefresh()
+{
+	if (!shutting_down && panel_refresh_timer && !panel_refresh_timer->isActive())
+		panel_refresh_timer->start(100);
+}
 static void requestChatImage(const QString &url);
 static void receiveCapturedBadges(const QByteArray &bytes);
 static void appendChat(const QString &platform, const QString &name, const QString &message,
@@ -409,7 +416,7 @@ static bool startOverlayServer(QWidget *parent)
 	return true;
 }
 
-static void refreshOverlay()
+static void publishOverlay()
 {
 	if (shutting_down)
 		return;
@@ -422,6 +429,12 @@ static void refreshOverlay()
 			++it;
 		}
 	}
+}
+
+static void refreshOverlay()
+{
+	if (!shutting_down && overlay_refresh_timer && !overlay_refresh_timer->isActive())
+		overlay_refresh_timer->start(50);
 }
 
 static QImage platformIcon(const QString &platform)
@@ -501,7 +514,7 @@ static void processBadgeCatalog(const QByteArray &bytes, const QString &room_id)
 			}
 		}
 	}
-	renderPanel();
+	schedulePanelRefresh();
 	refreshOverlay();
 }
 
@@ -531,7 +544,7 @@ static void pollAssets()
 				if (image.loadFromData(request->bytes)) {
 					image_cache.insert(request->url, image);
 					image_bytes.insert(request->url, request->bytes);
-					renderPanel();
+					schedulePanelRefresh();
 					refreshOverlay();
 				} else
 					failed_images.insert(request->url);
@@ -719,23 +732,31 @@ static void receiveCapturedBadges(const QByteArray &bytes)
 	if (badges.isEmpty())
 		return;
 	const QString key = platform + ":" + name.toLower();
-	if (captured_badges.size() > 200)
-		captured_badges.clear();
+	if (captured_badges.value(key) == badges)
+		return;
+	if (!captured_badges.contains(key) && captured_badges.size() >= 1000)
+		captured_badges.erase(captured_badges.begin());
 	captured_badges.insert(key, badges);
+	bool changed = false;
 	for (QJsonObject &entry : panel_history)
 		if (entry.value("platform").toString() == platform &&
-		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0)
+		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0) {
 			entry.insert("badges", badges);
+			changed = true;
+		}
 	for (int i = 0; i < overlay_messages.size(); ++i) {
 		QJsonObject entry = overlay_messages[i].toObject();
 		if (entry.value("platform").toString() == platform &&
 		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0) {
 			entry.insert("badges", badges);
 			overlay_messages.replace(i, entry);
+			changed = true;
 		}
 	}
-	renderPanel();
-	refreshOverlay();
+	if (changed) {
+		schedulePanelRefresh();
+		refreshOverlay();
+	}
 }
 
 static void appendChat(const QString &platform, const QString &name, const QString &message, const QJsonArray &badges,
@@ -1169,6 +1190,12 @@ bool obs_module_load(void)
 	asset_timer = new QTimer(body);
 	asset_timer->setInterval(80);
 	QObject::connect(asset_timer, &QTimer::timeout, body, pollAssets);
+	panel_refresh_timer = new QTimer(body);
+	panel_refresh_timer->setSingleShot(true);
+	QObject::connect(panel_refresh_timer, &QTimer::timeout, body, renderPanel);
+	overlay_refresh_timer = new QTimer(body);
+	overlay_refresh_timer->setSingleShot(true);
+	QObject::connect(overlay_refresh_timer, &QTimer::timeout, body, publishOverlay);
 	messages->setOpenExternalLinks(false);
 	messages->setLineWrapMode(QTextEdit::WidgetWidth);
 	messages->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
@@ -1575,6 +1602,8 @@ void obs_module_unload(void)
 		curl_multi_cleanup(asset_multi);
 	asset_multi = nullptr;
 	asset_timer = nullptr;
+	panel_refresh_timer = nullptr;
+	overlay_refresh_timer = nullptr;
 	image_cache.clear();
 	image_bytes.clear();
 	image_tokens.clear();
