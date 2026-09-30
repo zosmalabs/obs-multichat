@@ -12,6 +12,8 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
     } catch (_) {}
   }
   const sent = new Map();
+  const convertedImages = new Map();
+  let scanning = false;
   const selector = platform === 'Twitch'
     ? '.chat-line__message, [data-a-target="chat-line-message"]'
     : '[data-index], [data-chat-entry], .chat-entry, .chat-message';
@@ -23,6 +25,8 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
     : 'svg[data-ds-icon], img[src], .badge-tooltip svg';
   async function imageFor(node) {
     if (node.tagName !== 'svg') return node.currentSrc || node.src || '';
+    const signature = node.outerHTML;
+    if (convertedImages.has(signature)) return convertedImages.get(signature);
     try {
       const svg = new XMLSerializer().serializeToString(node);
       const image = new Image();
@@ -31,10 +35,16 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       const canvas = document.createElement('canvas');
       canvas.width = 40; canvas.height = 40;
       canvas.getContext('2d').drawImage(image, 0, 0, 40, 40);
-      return canvas.toDataURL('image/png');
+      const result = canvas.toDataURL('image/png');
+      convertedImages.set(signature, result);
+      if (convertedImages.size > 256) convertedImages.delete(convertedImages.keys().next().value);
+      return result;
     } catch (_) { return ''; }
   }
   async function scan() {
+    if (scanning) return;
+    scanning = true;
+    try {
     const rows = [...document.querySelectorAll(selector)].slice(-45);
     let found = 0;
     for (const row of rows) {
@@ -52,7 +62,7 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       const signature = badgeNodes.map(n => n.outerHTML).join('|');
       if (sent.get(name) === signature) continue;
       sent.set(name, signature);
-      if (sent.size > 100) sent.delete(sent.keys().next().value);
+      if (sent.size > 1000) sent.delete(sent.keys().next().value);
       const badges = [];
       for (const node of badgeNodes.slice(0, 15)) {
         const image = await imageFor(node);
@@ -64,8 +74,12 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       window.__zosmaStatusAt = Date.now();
       report({type:'status',platform,rows:rows.length,found,url:location.href});
     }
+    } finally { scanning = false; }
   }
-  const observer = new MutationObserver(() => { clearTimeout(window.__zosmaScanTimer); window.__zosmaScanTimer = setTimeout(scan, 100); });
+  const observer = new MutationObserver(() => {
+    if (window.__zosmaScanTimer) return;
+    window.__zosmaScanTimer = setTimeout(() => { window.__zosmaScanTimer = null; scan(); }, 250);
+  });
   function start() { observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,attributeFilter:['src']}); scan(); }
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
   setInterval(scan, 8000);
@@ -74,48 +88,63 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
 static constexpr const char *tiktok_capture_script = R"SCRIPT((() => {
   if (window.__zosmaTikTokCapture || !/(^|\.)tiktok\.com$/.test(location.hostname)) return;
   window.__zosmaTikTokCapture = true;
-  const seen = new WeakMap();
-  const pending = [];
-  let initialized = false;
-  let lastStatus = 0;
   let sequence = 0;
-  const rowsSelector = '[data-e2e="chat-message"]';
-  const enqueue = data => { if (pending.length < 100) pending.push(data); };
-  setInterval(() => {
-    if (!pending.length) return;
+  const seen = new Set();
+  const rowSignatures = new WeakMap();
+  const recentMessages = new Map();
+  function report(payload) {
     try {
-      document.title = 'zosma:' + btoa(unescape(encodeURIComponent(JSON.stringify({...pending.shift(), sequence: ++sequence}))));
+      document.title = 'zosma:' + btoa(unescape(encodeURIComponent(JSON.stringify({
+        platform: 'TikTok', sequence: ++sequence, ...payload
+      }))));
     } catch (_) {}
-  }, 130);
-  function scan() {
-    const rows = [...document.querySelectorAll(rowsSelector)].slice(-80);
-    for (const row of rows) {
-      const nameNode = row.querySelector('[data-e2e="message-owner-name"]');
-      const name = (nameNode?.textContent || nameNode?.getAttribute('title') || '').trim().slice(0, 80);
-      const messageNode = row.querySelector('[class*="-DivComment"], .live-shared-ui-chat-list-chat-message-comment, [data-e2e="chat-message"] .break-words.align-middle') ||
-        nameNode?.closest('[class*="DivUserInfo"]')?.nextElementSibling;
-      const message = (messageNode?.textContent || '').trim().slice(0, 500);
-      if (!name || !message) continue;
-      const signature = name + '\n' + message;
-      if (seen.get(row) === signature) continue;
-      seen.set(row, signature);
-      if (initialized) enqueue({type:'chat', platform:'TikTok', name, message});
-    }
-    initialized = true;
-    if (Date.now() - lastStatus > 5000) {
-      lastStatus = Date.now();
-      enqueue({type:'status', platform:'TikTok', rows:rows.length, url:location.href});
+  }
+  function mute() {
+    for (const media of document.querySelectorAll('video, audio')) {
+      media.muted = true;
+      media.volume = 0;
     }
   }
-  const observer = new MutationObserver(() => {
-    clearTimeout(window.__zosmaTikTokScanTimer);
-    window.__zosmaTikTokScanTimer = setTimeout(scan, 120);
-  });
+  let lastStatus = 0;
+  function scan() {
+    mute();
+    const rows = [...document.querySelectorAll('[data-e2e="chat-message"]')].slice(-40);
+    for (const row of rows) {
+      const name = row.querySelector('[data-e2e="message-owner-name"]')?.textContent?.trim();
+      const message = row.querySelector('[class*="break-words"][class*="align-middle"]')?.textContent?.trim();
+      if (!name || !message) continue;
+      const signature = name + ':' + message;
+      // The virtualized list changes data-index while mounting its first rows.
+      // Do not treat an index change on the same row as a new comment.
+      if (rowSignatures.get(row) === signature) continue;
+      rowSignatures.set(row, signature);
+      const index = row.closest('[data-index]')?.getAttribute('data-index') || '';
+      const key = index + ':' + name + ':' + message;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (seen.size > 500) seen.delete(seen.values().next().value);
+      const now = Date.now();
+      const lastSeen = recentMessages.get(signature);
+      recentMessages.set(signature, now);
+      for (const [text, time] of recentMessages) {
+        if (now - time > 3000) recentMessages.delete(text);
+      }
+      // Also handle a row replaced by React during the initial chat render.
+      if (lastSeen !== undefined && now - lastSeen < 3000) continue;
+      report({type:'message',name:name.slice(0,80),message:message.slice(0,500),url:location.href});
+    }
+    if (Date.now() - lastStatus > 5000) {
+      lastStatus = Date.now();
+      report({type:'status',rows:rows.length,url:location.href});
+    }
+  }
+  let timer;
   function start() {
+    new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(scan, 120); })
+      .observe(document.documentElement, {subtree:true,childList:true});
     scan();
-    observer.observe(document.documentElement, {subtree:true, childList:true, characterData:true});
+    setInterval(scan, 1500);
   }
   if (document.documentElement) start();
   else document.addEventListener('DOMContentLoaded', start, {once:true});
-  setInterval(scan, 3000);
 })())SCRIPT";

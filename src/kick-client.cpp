@@ -166,7 +166,8 @@ void KickClient::start(const QString &channel)
 							break;
 						lastPing = now;
 					}
-					std::this_thread::sleep_for(std::chrono::milliseconds(80));
+					if (result == CURLE_AGAIN)
+						std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				}
 			}
 			curl_easy_cleanup(curl);

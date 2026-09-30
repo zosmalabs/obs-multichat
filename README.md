@@ -5,18 +5,19 @@ Primeiro protótipo do plugin para OBS Studio, baseado no template oficial do OB
 ## Estado atual
 
 O plugin registra um painel acoplável em Exibir → Painéis. Permite cadastrar
-endereços de YouTube, Twitch, Kick e TikTok, salvar os campos e mostrar duas
-mensagens de demonstração pelo botão Testar painel.
+endereços de YouTube, Twitch e Kick e receber as mensagens no painel.
 
 Após salvar um canal da Twitch, esta versão tenta receber mensagens reais
 diretamente por IRC/TLS, sem popup e sem login. O canal também reconecta
 automaticamente após uma queda de conexão. O conector experimental da Kick busca o ID da sala no endereço público do canal
 e se inscreve no fluxo de mensagens. A Kick pode impedir essa consulta com
 verificação no navegador; o painel informa a falha. O conector experimental
-do YouTube aceita a URL de uma live ou do chat, lê o identificador da live
-e consulta as mensagens sem login, respeitando o tempo sugerido pela própria
-plataforma. A interface usada pelo YouTube não é pública e pode mudar. TikTok
-ainda está pendente. Ao marcar Exibir na transmissão, o plugin cria uma fonte
+do YouTube aceita o @ do canal, o ID do canal (`UC...`) ou o link direto de uma live.
+Com @ ou ID, consulta a transmissão ativa do canal a cada 30 segundos enquanto
+ele estiver offline e volta a procurar depois que o chat encerrar. Com link direto,
+acompanha apenas a live informada. O plugin consulta as mensagens sem login,
+respeitando o tempo sugerido pela plataforma. A interface usada pelo YouTube
+não é pública e pode mudar. Ao marcar Exibir na transmissão, o plugin cria uma fonte
 de navegador Zosma Multichat Web na cena atual e nas cenas usadas depois.
 Ela recebe as mensagens de um servidor HTTP acessível somente em 127.0.0.1,
 dentro do plugin, e mostra até o número de linhas escolhido no painel. O grupo
@@ -24,6 +25,7 @@ Aparência oferece tamanho de letra, estilo cartões ou simples, cores dos nicks
 por plataforma e cor do fundo da transmissão (inclusive transparente), além
 da cor de fundo do painel de mensagens. As escolhas ficam salvas e atualizam
 a fonte de navegador em tempo real.
+O aviso sonoro pode ser ativado em Aparência, com ajuste de volume, escolha da saída de áudio e botão de teste. O som é reproduzido localmente, sem ser adicionado diretamente ao áudio da transmissão.
 O OBS salva a fonte nas cenas e o plugin atualiza seu endereço local ao reiniciar.
 A fonte de texto anterior Zosma Multichat é removida na primeira ativação
 da fonte de navegador. O painel usa apenas o símbolo da plataforma em cada
@@ -63,7 +65,7 @@ usa o pacote extraível para facilitar a substituição dos arquivos.
 
 ## Próximas etapas
 
-Implementar a captura do TikTok e opções adicionais de aparência para o chat.
+Melhorar a aparência e a estabilidade da captura do chat.
 
 Este projeto inclui código e infraestrutura derivados do template oficial
 https://github.com/obsproject/obs-plugintemplate sob a licença em LICENSE.

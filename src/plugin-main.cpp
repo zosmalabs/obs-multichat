@@ -4,8 +4,15 @@
 #include <util/platform.h>
 
 #include <QCheckBox>
+#include <QCloseEvent>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QUrl>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QSlider>
 #include <QCryptographicHash>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -22,9 +29,14 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QTextDocument>
+#include <QTextOption>
+#include <QAbstractTextDocumentLayout>
+#include <QWheelEvent>
+#include <QKeyEvent>
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QSpinBox>
@@ -44,6 +56,17 @@
 #include <QUrlQuery>
 #include <QStringList>
 #include <curl/curl.h>
+#include <cstring>
+#include <memory>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#else
+#include <QAudioDevice>
+#include <QMediaDevices>
+#include <QSoundEffect>
+#endif
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -62,7 +85,28 @@ static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
-static QPointer<QLabel> capture_status;
+static bool panel_follow_bottom = true;
+
+class ChatPanel : public QTextBrowser {
+public:
+	using QTextBrowser::QTextBrowser;
+protected:
+	void wheelEvent(QWheelEvent *event) override
+	{
+		panel_follow_bottom = false;
+		QTextBrowser::wheelEvent(event);
+		panel_follow_bottom = verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 2;
+	}
+	void keyPressEvent(QKeyEvent *event) override
+	{
+		panel_follow_bottom = false;
+		QTextBrowser::keyPressEvent(event);
+		panel_follow_bottom = verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 2;
+	}
+};
+static QPointer<QLabel> capture_status_twitch;
+static QPointer<QLabel> capture_status_kick;
+static QPointer<QLabel> capture_status_tiktok;
 static QList<QJsonObject> panel_history;
 static QHash<QString, QImage> image_cache;
 static QHash<QString, QByteArray> image_bytes;
@@ -81,7 +125,88 @@ static QPointer<QCefWidget> tiktok_capture;
 static QCef *capture_cef = nullptr;
 static QString capture_twitch_channel;
 static QString capture_kick_channel;
-static QString capture_tiktok_channel;
+static QString capture_tiktok_url;
+#ifdef _WIN32
+static QPointer<QObject> notification_owner;
+static UINT notification_device = WAVE_MAPPER;
+static int notification_volume = 50;
+#else
+static QPointer<QSoundEffect> notification_sound;
+#endif
+static bool notification_enabled = false;
+static qint64 last_notification_ms = 0;
+#ifdef _WIN32
+struct NativePlayback {
+	HWAVEOUT handle = nullptr;
+	WAVEHDR header = {};
+	QByteArray pcm;
+	bool prepared = false;
+	~NativePlayback()
+	{
+		if (!handle)
+			return;
+		waveOutReset(handle);
+		if (prepared)
+			waveOutUnprepareHeader(handle, &header, sizeof(header));
+		waveOutClose(handle);
+	}
+};
+#endif
+
+static void playNotification()
+{
+#ifdef _WIN32
+	if (!notification_owner)
+		return;
+	QFile file(":/multichat/notification.wav");
+	if (!file.open(QIODevice::ReadOnly))
+		return;
+	const QByteArray wav = file.readAll();
+	if (wav.size() <= 44 || wav.left(4) != "RIFF" || wav.mid(8, 4) != "WAVE")
+		return;
+	auto playback = std::make_shared<NativePlayback>();
+	playback->pcm = wav.mid(44);
+	for (qsizetype i = 0; i + 1 < playback->pcm.size(); i += 2) {
+		qint16 sample;
+		std::memcpy(&sample, playback->pcm.constData() + i, sizeof(sample));
+		sample = static_cast<qint16>((static_cast<int>(sample) * notification_volume) / 100);
+		std::memcpy(playback->pcm.data() + i, &sample, sizeof(sample));
+	}
+	WAVEFORMATEX format = {};
+	format.wFormatTag = WAVE_FORMAT_PCM;
+	format.nChannels = 1;
+	format.nSamplesPerSec = 44100;
+	format.wBitsPerSample = 16;
+	format.nBlockAlign = 2;
+	format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+	if (waveOutOpen(&playback->handle, notification_device, &format, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
+		return;
+	playback->header.lpData = playback->pcm.data();
+	playback->header.dwBufferLength = static_cast<DWORD>(playback->pcm.size());
+	if (waveOutPrepareHeader(playback->handle, &playback->header, sizeof(playback->header)) != MMSYSERR_NOERROR)
+		return;
+	playback->prepared = true;
+	if (waveOutWrite(playback->handle, &playback->header, sizeof(playback->header)) != MMSYSERR_NOERROR)
+		return;
+	// Keep the sample and header alive until playback ends; cancel safely when the dock closes.
+	QTimer::singleShot(700, notification_owner, [playback] {});
+#else
+	if (notification_sound)
+		notification_sound->play();
+#endif
+}
+
+class CaptureWindow : public QWidget {
+public:
+	using QWidget::QWidget;
+
+protected:
+	void closeEvent(QCloseEvent *event) override
+	{
+		setGeometry(-3000, -3000, 2000, 850);
+		event->ignore();
+	}
+};
 static QHash<QString, QString> capture_state;
 struct AssetRequest {
 	CURL *handle = nullptr;
@@ -92,9 +217,16 @@ struct AssetRequest {
 };
 static CURLM *asset_multi = nullptr;
 static QTimer *asset_timer = nullptr;
+static QTimer *panel_refresh_timer = nullptr;
+static QTimer *overlay_refresh_timer = nullptr;
 static QHash<CURL *, AssetRequest *> asset_requests;
 
 static void renderPanel();
+static void schedulePanelRefresh()
+{
+	if (!shutting_down && panel_refresh_timer && !panel_refresh_timer->isActive())
+		panel_refresh_timer->start(100);
+}
 static void requestChatImage(const QString &url);
 static void receiveCapturedBadges(const QByteArray &bytes);
 static void appendChat(const QString &platform, const QString &name, const QString &message,
@@ -103,11 +235,14 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 
 static void showCaptureState()
 {
-	if (capture_status)
-		capture_status->setText(QString::fromUtf8("Captura · Twitch: %1 · Kick: %2 · TikTok: %3")
-						.arg(capture_state.value("Twitch", "aguardando"),
-						     capture_state.value("Kick", "aguardando"),
-						     capture_state.value("TikTok", "aguardando")));
+	if (capture_status_twitch)
+		capture_status_twitch->setText(QString::fromUtf8("Badges: %1")
+						      .arg(capture_state.value("Twitch", "aguardando")));
+	if (capture_status_kick)
+		capture_status_kick->setText(QString::fromUtf8("Badges: %1")
+						    .arg(capture_state.value("Kick", "aguardando")));
+	if (capture_status_tiktok)
+		capture_status_tiktok->setText(capture_state.value("TikTok", QString::fromUtf8("Aguardando página...")));
 }
 
 static void receiveCaptureTitle(const QString &title)
@@ -119,20 +254,31 @@ static void receiveCaptureTitle(const QString &title)
 	const QString platform = payload.value("platform").toString();
 	if (platform != "Twitch" && platform != "Kick" && platform != "TikTok")
 		return;
-	if (platform == "TikTok" && payload.value("type").toString() == "chat") {
-		appendChat(platform, payload.value("name").toString(), payload.value("message").toString());
+	if (platform == "TikTok") {
+		const QUrl url(payload.value("url").toString());
+		if (url.host() != "www.tiktok.com" && url.host() != "tiktok.com")
+			return;
+		if (payload.value("type").toString() == "message") {
+			const QString name = payload.value("name").toString();
+			const QString message = payload.value("message").toString();
+			if (!name.isEmpty() && !message.isEmpty()) {
+				appendChat("TikTok", name, message);
+				capture_state.insert("TikTok", QString::fromUtf8("TikTok: recebendo mensagens."));
+			}
+		} else if (capture_state.value("TikTok") != QString::fromUtf8("TikTok: recebendo mensagens.")) {
+			capture_state.insert("TikTok", payload.value("rows").toInt() > 0
+							? QString::fromUtf8("TikTok: chat visível, aguardando novas mensagens.")
+							: QString::fromUtf8("TikTok: página aberta, procurando comentários."));
+		}
+		showCaptureState();
 		return;
 	}
 	if (payload.value("type").toString() == "status") {
 		const QString url = payload.value("url").toString();
-		if (QUrl(url).host() != "tiktok.com" && QUrl(url).host() != "www.tiktok.com" &&
-		    QUrl(url).host() != "kick.com" && QUrl(url).host() != "www.kick.com" &&
+		if (QUrl(url).host() != "kick.com" && QUrl(url).host() != "www.kick.com" &&
 		    QUrl(url).host() != "www.twitch.tv" && QUrl(url).host() != "twitch.tv") {
 			capture_state.insert(platform,
 					     QString::fromUtf8("endereço inesperado: %1").arg(QUrl(url).host()));
-		} else if (platform == "TikTok") {
-			capture_state.insert(platform, QString::fromUtf8("chat aberto (%1 linhas visíveis)")
-							       .arg(payload.value("rows").toInt()));
 		} else {
 			capture_state.insert(platform, QString::fromUtf8("chat ativo (%1 linhas, %2 badges visíveis)")
 							       .arg(payload.value("rows").toInt())
@@ -201,7 +347,7 @@ html,body{margin:0;overflow:hidden;font:32px Arial,sans-serif;color:#fff;backgro
 .emote{height:1.15em;vertical-align:middle;object-fit:contain}
 .nick{color:var(--nick-color);font-weight:700}.message{white-space:pre-wrap}
 </style><div id="chat"></div><script>
-const colors={Twitch:'#9146ff',Kick:'#53fc18',YouTube:'#ff0033',TikTok:'#ffffff'};
+const colors={Twitch:'#9146ff',Kick:'#53fc18',YouTube:'#ff0033',TikTok:'#ee1d52'};
 const badges={Twitch:'T',Kick:'K',YouTube:'▶',TikTok:'♪'};
 const chat=document.getElementById('chat');
 function draw(data){document.body.style.background=data.background;document.body.style.fontSize=data.fontSize+'px';
@@ -292,7 +438,7 @@ static bool startOverlayServer(QWidget *parent)
 	return true;
 }
 
-static void refreshOverlay()
+static void publishOverlay()
 {
 	if (shutting_down)
 		return;
@@ -305,6 +451,12 @@ static void refreshOverlay()
 			++it;
 		}
 	}
+}
+
+static void refreshOverlay()
+{
+	if (!shutting_down && overlay_refresh_timer && !overlay_refresh_timer->isActive())
+		overlay_refresh_timer->start(50);
 }
 
 static QImage platformIcon(const QString &platform)
@@ -326,9 +478,8 @@ static QImage platformIcon(const QString &platform)
 	font.setPixelSize(23);
 	painter.setFont(font);
 	painter.drawText(icon.rect(), Qt::AlignCenter,
-			 platform == "YouTube"  ? QString::fromUtf8("▶")
-			 : platform == "TikTok" ? QString::fromUtf8("♪")
-						: platform.left(1));
+			 platform == "YouTube" ? QString::fromUtf8("▶")
+			 : platform == "TikTok" ? QString::fromUtf8("♪") : platform.left(1));
 	return icon;
 }
 
@@ -385,7 +536,7 @@ static void processBadgeCatalog(const QByteArray &bytes, const QString &room_id)
 			}
 		}
 	}
-	renderPanel();
+	schedulePanelRefresh();
 	refreshOverlay();
 }
 
@@ -415,7 +566,7 @@ static void pollAssets()
 				if (image.loadFromData(request->bytes)) {
 					image_cache.insert(request->url, image);
 					image_bytes.insert(request->url, request->bytes);
-					renderPanel();
+					schedulePanelRefresh();
 					refreshOverlay();
 				} else
 					failed_images.insert(request->url);
@@ -478,40 +629,49 @@ static QString panelMessageHtml(const QJsonObject &entry)
 	return result + message.mid(offset).toHtmlEscaped();
 }
 
+static QString panelEntryHtml(const QJsonObject &entry)
+{
+	QString html;
+	const QString platform = entry.value("platform").toString();
+		const QString color = platform == "Twitch" ? "#9146ff" : platform == "Kick" ? "#53fc18"
+						       : platform == "TikTok" ? "#ee1d52" : "#ff0033";
+	const QUrl resource(QString("platform:%1").arg(platform.toLower()));
+	panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
+	html += QString("<p style='margin:4px 0;color:white;font-family:Arial;font-size:13px'><img src='%1' width='18' height='18'> ")
+			.arg(resource.toString());
+	for (const QJsonValue value : entry.value("badges").toArray()) {
+		const QJsonObject badge = value.toObject();
+		const QString label = badge.value("label").toString();
+		QString url = badge.value("image").toString();
+		if (url.isEmpty())
+			url = twitch_badge_images.value(badge.value("key").toString()).toString();
+		if (!url.isEmpty())
+			html += panelImage(url, label, 17) + " ";
+		else
+			html += QString("<span style='color:#cccccc'>[%1]</span> ").arg(label.toHtmlEscaped());
+	}
+	html += QString("<b style='color:%1'>%2:</b> %3</p>")
+			.arg(color, entry.value("name").toString().toHtmlEscaped(), panelMessageHtml(entry));
+	return html;
+}
 static void renderPanel()
 {
 	if (!panel_view)
 		return;
 	auto *scroll = panel_view->verticalScrollBar();
-	const bool at_bottom = scroll->value() >= scroll->maximum() - 24;
+	const bool at_bottom = panel_follow_bottom;
 	const int previous = scroll->value();
-	QString html = "<html><body style='color:white;font-family:Arial;font-size:13px'>";
-	for (const QJsonObject &entry : panel_history) {
-		const QString platform = entry.value("platform").toString();
-		const QString color = platform == "Twitch"   ? "#9146ff"
-				      : platform == "Kick"   ? "#53fc18"
-				      : platform == "TikTok" ? "#ee1d52"
-							     : "#ff0033";
-		const QUrl resource(QString("platform:%1").arg(platform.toLower()));
-		panel_view->document()->addResource(QTextDocument::ImageResource, resource, platformIcon(platform));
-		html += QString("<p style='margin:4px 0'><img src='%1' width='18' height='18'> ")
-				.arg(resource.toString());
-		for (const QJsonValue value : entry.value("badges").toArray()) {
-			const QJsonObject badge = value.toObject();
-			const QString label = badge.value("label").toString();
-			QString url = badge.value("image").toString();
-			if (url.isEmpty())
-				url = twitch_badge_images.value(badge.value("key").toString()).toString();
-			if (!url.isEmpty())
-				html += panelImage(url, label, 17) + " ";
-			else
-				html += QString("<span style='color:#cccccc'>[%1]</span> ").arg(label.toHtmlEscaped());
-		}
-		html += QString("<b style='color:%1'>%2:</b> %3</p>")
-				.arg(color, entry.value("name").toString().toHtmlEscaped(), panelMessageHtml(entry));
-	}
+	QString html = "<html><body>";
+	for (const QJsonObject &entry : panel_history)
+		html += panelEntryHtml(entry);
+	// Replacing the document briefly resets its scroll position. Keep that
+	// intermediate state off screen so the dock does not flash at the bottom.
+	panel_view->setUpdatesEnabled(false);
 	panel_view->setHtml(html + "</body></html>");
-	scroll->setValue(at_bottom ? scroll->maximum() : previous);
+	// Force layout at the viewport width; adjustSize() changes the document width.
+	panel_view->document()->documentLayout()->documentSize();
+	scroll->setValue(at_bottom ? scroll->maximum() : qMin(previous, scroll->maximum()));
+	panel_view->setUpdatesEnabled(true);
 }
 
 static bool attachOverlay()
@@ -595,23 +755,31 @@ static void receiveCapturedBadges(const QByteArray &bytes)
 	if (badges.isEmpty())
 		return;
 	const QString key = platform + ":" + name.toLower();
-	if (captured_badges.size() > 200)
-		captured_badges.clear();
+	if (captured_badges.value(key) == badges)
+		return;
+	if (!captured_badges.contains(key) && captured_badges.size() >= 1000)
+		captured_badges.erase(captured_badges.begin());
 	captured_badges.insert(key, badges);
+	bool changed = false;
 	for (QJsonObject &entry : panel_history)
 		if (entry.value("platform").toString() == platform &&
-		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0)
+		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0) {
 			entry.insert("badges", badges);
+			changed = true;
+		}
 	for (int i = 0; i < overlay_messages.size(); ++i) {
 		QJsonObject entry = overlay_messages[i].toObject();
 		if (entry.value("platform").toString() == platform &&
 		    entry.value("name").toString().compare(name, Qt::CaseInsensitive) == 0) {
 			entry.insert("badges", badges);
 			overlay_messages.replace(i, entry);
+			changed = true;
 		}
 	}
-	renderPanel();
-	refreshOverlay();
+	if (changed) {
+		schedulePanelRefresh();
+		refreshOverlay();
+	}
 }
 
 static void appendChat(const QString &platform, const QString &name, const QString &message, const QJsonArray &badges,
@@ -627,9 +795,22 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 	while (overlay_messages.size() > 50)
 		overlay_messages.removeAt(0);
 	panel_history.append(entry);
-	while (panel_history.size() > 100)
-		panel_history.removeFirst();
-	renderPanel();
+	if (panel_history.size() > 200) {
+		while (panel_history.size() > 100)
+			panel_history.removeFirst();
+		renderPanel();
+	} else if (panel_view) {
+		auto *scroll = panel_view->verticalScrollBar();
+		const bool at_bottom = panel_follow_bottom;
+		const int previous = scroll->value();
+		panel_view->append(panelEntryHtml(entry));
+		scroll->setValue(at_bottom ? scroll->maximum() : previous);
+	}
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (notification_enabled && now - last_notification_ms >= 1500) {
+		playNotification();
+		last_notification_ms = now;
+	}
 	if (overlay_checkbox && overlay_checkbox->isChecked())
 		refreshOverlay();
 }
@@ -689,11 +870,13 @@ static void frontendEvent(enum obs_frontend_event event, void *)
 {
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
 		shutting_down = true;
+		if (asset_timer)
+			asset_timer->stop();
 		stopCapture();
 		if (overlay_server)
 			overlay_server->close();
 	} else if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-		startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
+		startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_url);
 		if (overlay_checkbox && overlay_checkbox->isChecked() && attachOverlay() && overlay_status)
 			overlay_status->setText(QString::fromUtf8("Fonte Zosma Multichat Web ativa na cena atual."));
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED) {
@@ -735,6 +918,29 @@ static QString youtubeVideoId(const QString &input)
 	return QRegularExpression("^[a-zA-Z0-9_-]{11}$").match(id).hasMatch() ? id : QString();
 }
 
+static QString youtubeSource(const QString &input)
+{
+	const QString source = input.trimmed();
+	QUrl url(source);
+	QString host = url.host().toLower();
+	if (host.startsWith("www."))
+		host.remove(0, 4);
+	if (url.scheme() == "https" && host == "youtube.com") {
+		const QStringList parts = url.path().split('/', Qt::SkipEmptyParts);
+		if (parts.size() == 1 &&
+		    QRegularExpression("^@[\\p{L}\\p{N}_.-]{3,30}$").match(parts[0]).hasMatch())
+			return "https://www.youtube.com/" + parts[0] + "/live";
+		if (parts.size() == 2 && parts[0] == "channel" &&
+			   QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(parts[1]).hasMatch())
+			return "https://www.youtube.com/channel/" + parts[1] + "/live";
+	}
+	if (QRegularExpression("^UC[a-zA-Z0-9_-]{22}$").match(source).hasMatch())
+		return "https://www.youtube.com/channel/" + source + "/live";
+	if (QRegularExpression("^@?[\\p{L}\\p{N}_.-]{3,30}$").match(source).hasMatch())
+		return "https://www.youtube.com/" + (source.startsWith('@') ? source : "@" + source) + "/live";
+	return youtubeVideoId(source);
+}
+
 static QString ircUnescape(QString value)
 {
 	return value.replace("\\s", " ")
@@ -762,29 +968,21 @@ static QString kickChannel(const QString &input)
 	return QRegularExpression("^[a-zA-Z0-9_-]+$").match(channel).hasMatch() ? channel.toLower() : QString();
 }
 
-static QString tiktokChannel(const QString &input)
-{
-	QString channel = input.trimmed();
-	if (channel.startsWith("https://")) {
-		const QUrl url(channel);
-		if (url.host() != "tiktok.com" && url.host() != "www.tiktok.com")
-			return {};
-		channel = url.path().split('/', Qt::SkipEmptyParts).value(0);
-	}
-	if (channel.startsWith('@'))
-		channel.remove(0, 1);
-	return QRegularExpression("^[a-zA-Z0-9_.]{2,24}$").match(channel).hasMatch() ? channel : QString();
-}
-
 static bool validSource(int platform, const QString &value)
 {
 	const QString input = value.trimmed();
 	if (input.isEmpty())
 		return true;
-	if (platform == 0 || platform == 1 || platform == 3) {
+	if (platform == 3) {
+		const QUrl url(input);
+		const QString host = url.host().toLower();
+		return url.scheme() == "https" && (host == "tiktok.com" || host == "www.tiktok.com") &&
+		       QRegularExpression("^/@[A-Za-z0-9._]{2,24}/live/?$").match(url.path()).hasMatch();
+	}
+	if (platform == 2)
+		return !youtubeSource(input).isEmpty();
+	if (platform == 0 || platform == 1) {
 		if (platform == 0 && !twitchChannel(input).isEmpty())
-			return true;
-		if (platform == 3 && !tiktokChannel(input).isEmpty())
 			return true;
 		if (platform == 1 && QRegularExpression("^@?[a-zA-Z0-9_-]+$").match(input).hasMatch())
 			return true;
@@ -800,18 +998,13 @@ static bool validSource(int platform, const QString &value)
 		return host == "twitch.tv" && !twitchChannel(input).isEmpty();
 	case 1:
 		return host == "kick.com" && !kickChannel(input).isEmpty();
-	case 2:
-		return !youtubeVideoId(input).isEmpty();
-	case 3:
-		return host == "tiktok.com" && !tiktokChannel(input).isEmpty();
 	}
 	return false;
 }
 
 static void startCapture(const QString &twitch, const QString &kick, const QString &tiktok)
 {
-	if (shutting_down || !overlay_server ||
-	    (!capture_window && twitch.isEmpty() && kick.isEmpty() && tiktok.isEmpty()))
+	if (shutting_down || !overlay_server || (!capture_window && twitch.isEmpty() && kick.isEmpty() && tiktok.isEmpty()))
 		return;
 	if (!capture_cef) {
 		obs_module_t *module = obs_get_module("obs-browser");
@@ -830,9 +1023,10 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 	if (!capture_cef->initialized())
 		return;
 	if (!capture_window) {
-		capture_window = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint);
+		capture_window = new CaptureWindow(nullptr, Qt::Tool | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+		capture_window->setWindowTitle(QString::fromUtf8("Captura dos chats · feche para ocultar"));
 		capture_window->setAttribute(Qt::WA_ShowWithoutActivating);
-		capture_window->setGeometry(-3000, -3000, 1140, 600);
+		capture_window->setGeometry(-3000, -3000, 2000, 850);
 		capture_window->show();
 	}
 	auto update = [&](QPointer<QCefWidget> &widget, const QString &channel, const QString &url, int x,
@@ -847,7 +1041,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 		}
 		const bool created = !widget;
 		if (created) {
-			widget = capture_cef->create_widget(capture_window, url.toStdString());
+			widget = capture_cef->create_widget(capture_window, url.toStdString(), nullptr);
 			if (!widget)
 				return;
 			QObject::connect(widget, &QCefWidget::titleChanged, capture_window,
@@ -862,7 +1056,7 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 							 showCaptureState();
 						 }
 					 });
-			widget->setGeometry(x, 0, 380, 600);
+			widget->setGeometry(x, 0, platform == "TikTok" ? 440 : 380, 650);
 			widget->setStartupScript(script);
 			widget->allowAllPopups(false);
 			widget->show();
@@ -879,10 +1073,9 @@ static void startCapture(const QString &twitch, const QString &kick, const QStri
 		capture_kick_channel = kick;
 		update(kick_capture, kick, "https://kick.com/popout/" + kick + "/chat", 380, "Kick", capture_script);
 	}
-	if (tiktok != capture_tiktok_channel || !tiktok_capture) {
-		capture_tiktok_channel = tiktok;
-		update(tiktok_capture, tiktok, "https://www.tiktok.com/@" + tiktok + "/live", 760, "TikTok",
-		       tiktok_capture_script);
+	if (tiktok != capture_tiktok_url || !tiktok_capture) {
+		capture_tiktok_url = tiktok;
+		update(tiktok_capture, tiktok, tiktok, 760, "TikTok", tiktok_capture_script);
 	}
 }
 
@@ -904,8 +1097,9 @@ bool obs_module_load(void)
 	tabs->addTab(appearance_page, QString::fromUtf8("Aparência"));
 	layout->addWidget(tabs);
 	constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
-	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube", "TikTok"};
+	constexpr const char *labels[] = {"Twitch", "Kick", "YouTube", "TikTok (teste)"};
 	QLineEdit *inputs[4];
+	QLabel *platform_status[4];
 	QSettings settings("Zosma", "OBS Multichat");
 	overlay_font_size = qBound(16, settings.value("overlay_font_size", 32).toInt(), 64);
 	overlay_nick_colors = settings.value("overlay_nick_colors", true).toBool();
@@ -915,11 +1109,46 @@ bool obs_module_load(void)
 		overlay_background = QColor(0, 0, 0, 0);
 	for (int i = 0; i < 4; ++i) {
 		inputs[i] = new QLineEdit(body);
-		inputs[i]->setPlaceholderText(i == 2 ? "Link da live ou do chat" : "@canal ou link");
+		inputs[i]->setPlaceholderText(i == 3 ? QString::fromUtf8("https://www.tiktok.com/@canal/live")
+					     : i == 2 ? QString::fromUtf8("@canal, canal, ID, link do canal ou da live")
+						      : QString::fromUtf8("@canal ou link popup do chat"));
 		inputs[i]->setText(settings.value(keys[i]).toString());
-		form->addRow(labels[i], inputs[i]);
+		auto *field = new QWidget(body);
+		auto *field_layout = new QVBoxLayout(field);
+		field_layout->setContentsMargins(0, 0, 0, 6);
+		field_layout->setSpacing(3);
+		field_layout->addWidget(inputs[i]);
+		platform_status[i] = new QLabel(inputs[i]->text().trimmed().isEmpty()
+							 ? QString::fromUtf8("Não configurada")
+							 : QString::fromUtf8("Aguardando conexão..."), field);
+		platform_status[i]->setWordWrap(true);
+		field_layout->addWidget(platform_status[i]);
+		if (i < 2) {
+			auto *badge_status = new QLabel(field);
+			badge_status->setWordWrap(true);
+			field_layout->addWidget(badge_status);
+			if (i == 0)
+				capture_status_twitch = badge_status;
+			else
+				capture_status_kick = badge_status;
+		}
+		if (i == 3)
+			capture_status_tiktok = platform_status[i];
+		form->addRow(labels[i], field);
 	}
 	sources_layout->addLayout(form);
+	auto *source_help = new QLabel(
+		QString::fromUtf8("<b>Como preencher</b><br>"
+				  "<b>Twitch e Kick:</b> digite @canal ou cole o link do popup do chat. "
+				  "Exemplo: @meucanal.<br>"
+				  "<b>YouTube:</b> digite o nome do canal com ou sem @, o ID do canal (UC...), "
+				  "cole o link do canal ou o link direto da live. "
+				  "Com um canal, o plugin procura a live ativa automaticamente.<br>"
+				  "<b>TikTok (teste):</b> cole a URL da live. A página é aberta no navegador interno "
+				  "do OBS, com o vídeo silenciado.<br>"
+				  "Depois clique em Salvar para conectar os chats."), sources_page);
+	source_help->setWordWrap(true);
+	sources_layout->addWidget(source_help);
 	auto *overlay = new QCheckBox(QString::fromUtf8("Exibir na transmissão"), body);
 	overlay_checkbox = overlay;
 	overlay->setChecked(settings.value("overlay", false).toBool());
@@ -960,19 +1189,53 @@ bool obs_module_load(void)
 				overlay_status->setText(QString::fromUtf8("Exibição na transmissão desativada."));
 		}
 	});
-	auto *status = new QLabel(QString::fromUtf8("Configure as fontes para o primeiro teste."), body);
-	status->setWordWrap(true);
-	sources_layout->addWidget(status);
 	auto *save = new QPushButton(QString::fromUtf8("Salvar fontes"), body);
 	sources_layout->addWidget(save);
-	auto *messages = new QTextBrowser(body);
+	auto *show_tiktok_capture = new QPushButton(QString::fromUtf8("Mostrar página do TikTok (login/verificação)"), body);
+	sources_layout->addWidget(show_tiktok_capture);
+	QObject::connect(show_tiktok_capture, &QPushButton::clicked, body, []() {
+		if (capture_window && tiktok_capture) {
+			capture_window->setGeometry(80, 80, 1210, 720);
+			capture_window->raise();
+			capture_window->activateWindow();
+		}
+	});
+	auto *messages = new ChatPanel(body);
 	panel_view = messages;
+	panel_follow_bottom = true;
+	auto *panel_scroll = messages->verticalScrollBar();
+	QObject::connect(panel_scroll, &QScrollBar::sliderMoved, body, [panel_scroll](int position) {
+		panel_follow_bottom = position >= panel_scroll->maximum() - 2;
+	});
+	QObject::connect(panel_scroll, &QScrollBar::actionTriggered, body, [panel_scroll](int) {
+		panel_follow_bottom = panel_scroll->sliderPosition() >= panel_scroll->maximum() - 2;
+	});
+	QObject::connect(panel_scroll, &QScrollBar::rangeChanged, body, [panel_scroll](int, int maximum) {
+		if (panel_follow_bottom)
+			panel_scroll->setValue(maximum);
+	});
+	auto *clear_messages = new QPushButton(QString::fromUtf8("Limpar mensagens"), chat_page);
+	chat_layout->addWidget(clear_messages);
+	QObject::connect(clear_messages, &QPushButton::clicked, body, []() {
+		panel_history.clear();
+		panel_follow_bottom = true;
+		renderPanel();
+	});
 	curl_global_init(CURL_GLOBAL_DEFAULT);
 	asset_multi = curl_multi_init();
 	asset_timer = new QTimer(body);
 	asset_timer->setInterval(80);
 	QObject::connect(asset_timer, &QTimer::timeout, body, pollAssets);
+	panel_refresh_timer = new QTimer(body);
+	panel_refresh_timer->setSingleShot(true);
+	QObject::connect(panel_refresh_timer, &QTimer::timeout, body, renderPanel);
+	overlay_refresh_timer = new QTimer(body);
+	overlay_refresh_timer->setSingleShot(true);
+	QObject::connect(overlay_refresh_timer, &QTimer::timeout, body, publishOverlay);
 	messages->setOpenExternalLinks(false);
+	messages->setLineWrapMode(QTextEdit::WidgetWidth);
+	messages->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+	messages->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	messages->setPlaceholderText(
 		QString::fromUtf8("As mensagens aparecerão aqui quando a captura for implementada."));
 	QColor panel_background(settings.value("panel_background", "#161922").toString());
@@ -982,9 +1245,6 @@ bool obs_module_load(void)
 		QString("QTextBrowser {background-color: %1; color: white; border-radius: 8px; padding: 8px;}")
 			.arg(panel_background.name()));
 	chat_layout->addWidget(messages);
-	capture_status = new QLabel(body);
-	capture_status->setWordWrap(true);
-	sources_layout->addWidget(capture_status);
 	sources_layout->addStretch();
 	showCaptureState();
 	auto *appearance = new QGroupBox(QString::fromUtf8("Personalização"), appearance_page);
@@ -1044,17 +1304,114 @@ bool obs_module_load(void)
 				.arg(selected.name()));
 	});
 	appearance_layout->addWidget(appearance);
+	// The sound is local to the OBS UI; it is never added to the stream audio mixer.
+	auto *alert_group = new QGroupBox(QString::fromUtf8("Aviso de mensagem"), appearance_page);
+	auto *alert_form = new QFormLayout(alert_group);
+	auto *alert_toggle = new QCheckBox(QString::fromUtf8("Tocar som ao receber mensagem"), alert_group);
+	notification_enabled = settings.value("notification_enabled", false).toBool();
+	alert_toggle->setChecked(notification_enabled);
+	alert_form->addRow(alert_toggle);
+#ifdef _WIN32
+	notification_owner = body;
+#else
+	notification_sound = new QSoundEffect(body);
+	notification_sound->setSource(QUrl("qrc:/multichat/notification.wav"));
+#endif
+	const int saved_volume = qBound(0, settings.value("notification_volume", 50).toInt(), 100);
+#ifdef _WIN32
+	notification_volume = saved_volume;
+#else
+	notification_sound->setVolume(saved_volume / 100.0);
+#endif
+	auto *alert_volume = new QSlider(Qt::Horizontal, alert_group);
+	alert_volume->setRange(0, 100);
+	alert_volume->setValue(saved_volume);
+	alert_form->addRow(QString::fromUtf8("Volume"), alert_volume);
+	QObject::connect(alert_volume, &QSlider::valueChanged, body, [](int value) {
+#ifdef _WIN32
+		notification_volume = value;
+#else
+  if (notification_sound) notification_sound->setVolume(value / 100.0);
+#endif
+		QSettings("Zosma", "OBS Multichat").setValue("notification_volume", value);
+	});
+	QObject::connect(alert_toggle, &QCheckBox::toggled, body, [](bool enabled) {
+		notification_enabled = enabled;
+		QSettings("Zosma", "OBS Multichat").setValue("notification_enabled", enabled);
+	});
+	auto *alert_device = new QComboBox(alert_group);
+	auto populate_devices = [alert_device]() {
+		const QString selected_device =
+			QSettings("Zosma", "OBS Multichat").value("notification_device").toString();
+		const QSignalBlocker blocker(alert_device);
+		alert_device->clear();
+		alert_device->addItem(QString::fromUtf8("Padrão do sistema"), QString());
+#ifdef _WIN32
+		for (UINT i = 0; i < waveOutGetNumDevs(); ++i) {
+			WAVEOUTCAPSW caps = {};
+			if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
+				alert_device->addItem(QString::fromWCharArray(caps.szPname), QString::number(i));
+		}
+#else
+		for (const QAudioDevice &device : QMediaDevices::audioOutputs())
+			alert_device->addItem(device.description(), QString::fromLatin1(device.id().toBase64()));
+#endif
+		const int index = alert_device->findData(selected_device);
+		alert_device->setCurrentIndex(index < 0 ? 0 : index);
+	};
+	populate_devices();
+	alert_form->addRow(QString::fromUtf8("Saída de áudio"), alert_device);
+	auto apply_device = [alert_device]() {
+#ifdef _WIN32
+		bool valid = false;
+		const UINT device = alert_device->currentData().toString().toUInt(&valid);
+		notification_device = valid ? device : WAVE_MAPPER;
+#else
+		if (!notification_sound)
+			return;
+		const QByteArray id = QByteArray::fromBase64(alert_device->currentData().toString().toLatin1());
+		QAudioDevice device = QMediaDevices::defaultAudioOutput();
+		for (const QAudioDevice &output : QMediaDevices::audioOutputs())
+			if (!id.isEmpty() && output.id() == id) {
+				device = output;
+				break;
+			}
+		if (!device.isNull())
+			notification_sound->setAudioDevice(device);
+#endif
+	};
+	apply_device();
+	QObject::connect(
+		alert_device, qOverload<int>(&QComboBox::currentIndexChanged), body, [alert_device, apply_device](int) {
+			QSettings("Zosma", "OBS Multichat").setValue("notification_device", alert_device->currentData());
+			apply_device();
+		});
+#ifndef _WIN32
+	QObject::connect(new QMediaDevices(body), &QMediaDevices::audioOutputsChanged, body,
+			 [populate_devices, apply_device]() {
+				 populate_devices();
+				 apply_device();
+			 });
+#endif
+	auto *preview_sound = new QPushButton(QString::fromUtf8("Testar som"), alert_group);
+	alert_form->addRow(preview_sound);
+	QObject::connect(preview_sound, &QPushButton::clicked, body, []() { playNotification(); });
+	appearance_layout->addWidget(alert_group);
+
 	appearance_layout->addStretch();
 	auto *kick = new KickClient(body);
 	auto *youtube = new YouTubeClient(body);
 	QObject::connect(youtube, &YouTubeClient::status, body,
-			 [status](const QString &message) { status->setText(message); });
+			 [platform_status](const QString &message) { platform_status[2]->setText(message); });
 	QObject::connect(youtube, &YouTubeClient::message, body,
-			 [](const QString &name, const QString &message) { appendChat("YouTube", name, message); });
+			 [platform_status](const QString &name, const QString &message) {
+				 appendChat("YouTube", name, message);
+				 platform_status[2]->setText(QString::fromUtf8("YouTube: recebendo mensagens."));
+			 });
 	QObject::connect(kick, &KickClient::status, body,
-			 [status](const QString &message) { status->setText(message); });
+			 [platform_status](const QString &message) { platform_status[1]->setText(message); });
 	QObject::connect(kick, &KickClient::message, body,
-			 [](const QString &name, const QString &message, const QJsonArray &raw_badges) {
+			 [platform_status](const QString &name, const QString &message, const QJsonArray &raw_badges) {
 				 QJsonArray badges;
 				 for (const QJsonValue value : raw_badges) {
 					 const QJsonObject badge = value.toObject();
@@ -1070,6 +1427,7 @@ bool obs_module_load(void)
 					 badges.append(display);
 				 }
 				 appendChat("Kick", name, message, badges, kickEmotes(message));
+				 platform_status[1]->setText(QString::fromUtf8("Kick: recebendo mensagens."));
 			 });
 	auto *socket = new QSslSocket(body);
 	auto *retry = new QTimer(body);
@@ -1082,22 +1440,22 @@ bool obs_module_load(void)
 		delete buffer;
 		delete plainMode;
 	});
-	auto connectChat = [socket, channel, plainMode, status]() {
+	auto connectChat = [socket, channel, plainMode, platform_status]() {
 		if (channel->isEmpty() || socket->state() != QAbstractSocket::UnconnectedState)
 			return;
-		status->setText(QString::fromUtf8("Twitch: conectando a #%1...").arg(*channel));
+		platform_status[0]->setText(QString::fromUtf8("Twitch: conectando a #%1...").arg(*channel));
 		if (*plainMode)
 			socket->connectToHost("irc.chat.twitch.tv", 6667);
 		else
 			socket->connectToHostEncrypted("irc.chat.twitch.tv", 6697);
 	};
 	QObject::connect(retry, &QTimer::timeout, socket, connectChat);
-	auto joinChat = [socket, channel, status, plainMode]() {
+	auto joinChat = [socket, channel, platform_status, plainMode]() {
 		socket->write("CAP REQ :twitch.tv/tags twitch.tv/commands\r\n");
 		socket->write("NICK justinfan" +
 			      QByteArray::number(QRandomGenerator::global()->bounded(100000, 999999)) + "\r\n");
 		socket->write("JOIN #" + channel->toUtf8() + "\r\n");
-		status->setText(
+		platform_status[0]->setText(
 			*plainMode ? QString::fromUtf8("Twitch: conectado a #%1 sem TLS. Aguardando mensagens.")
 					     .arg(*channel)
 				   : QString::fromUtf8("Twitch: conectado a #%1. Aguardando mensagens.").arg(*channel));
@@ -1107,7 +1465,7 @@ bool obs_module_load(void)
 		if (*plainMode)
 			joinChat();
 	});
-	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer]() {
+	QObject::connect(socket, &QSslSocket::readyRead, body, [socket, buffer, platform_status]() {
 		buffer->append(socket->readAll());
 		if (buffer->size() > 65536)
 			buffer->clear();
@@ -1155,37 +1513,38 @@ bool obs_module_load(void)
 				badges.append(QJsonObject{{"key", key}, {"label", key.section('/', 0, 0)}});
 			}
 			appendChat("Twitch", name, message, badges, twitchEmotes(message, tags_map.value("emotes")));
+			platform_status[0]->setText(QString::fromUtf8("Twitch: recebendo mensagens."));
 		}
 	});
-	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, status]() {
+	QObject::connect(socket, &QSslSocket::disconnected, body, [retry, channel, platform_status]() {
 		if (!channel->isEmpty()) {
-			status->setText(QString::fromUtf8("Twitch: desconectado. Reconectando..."));
+			platform_status[0]->setText(QString::fromUtf8("Twitch: desconectado. Reconectando..."));
 			retry->start(5000);
 		}
 	});
 	QObject::connect(socket, &QSslSocket::errorOccurred, body,
-			 [socket, status, plainMode, retry](QAbstractSocket::SocketError) {
+			 [socket, platform_status, plainMode, retry](QAbstractSocket::SocketError) {
 				 if (!*plainMode && (!QSslSocket::supportsSsl() ||
 						     socket->errorString().contains("TLS initialization failed",
 										    Qt::CaseInsensitive))) {
 					 *plainMode = true;
-					 status->setText(QString::fromUtf8(
+					 platform_status[0]->setText(QString::fromUtf8(
 						 "Twitch: TLS indisponível. Tentando conexão de leitura sem TLS..."));
 					 socket->abort();
 					 retry->start(100);
 					 return;
 				 }
-				 status->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
+				 platform_status[0]->setText(QString::fromUtf8("Twitch: %1").arg(socket->errorString()));
 			 });
 	QObject::connect(
 		save, &QPushButton::clicked, body,
-		[inputs, status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
+		[inputs, platform_status, socket, retry, channel, buffer, connectChat, kick, youtube]() {
 			constexpr const char *names[] = {"Twitch", "Kick", "YouTube", "TikTok"};
 			constexpr const char *keys[] = {"twitch", "kick", "youtube", "tiktok"};
 			QSettings settings("Zosma", "OBS Multichat");
 			for (int i = 0; i < 4; ++i) {
 				if (!validSource(i, inputs[i]->text())) {
-					status->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
+					platform_status[i]->setText(QString::fromUtf8("Endereço inválido em %1.").arg(names[i]));
 					return;
 				}
 			}
@@ -1193,31 +1552,32 @@ bool obs_module_load(void)
 				settings.setValue(keys[i], inputs[i]->text().trimmed());
 			settings.sync();
 			if (settings.status() != QSettings::NoError) {
-				status->setText(QString::fromUtf8("Falha ao salvar as fontes."));
+				for (auto *label : platform_status)
+					label->setText(QString::fromUtf8("Falha ao salvar as fontes."));
 				return;
 			}
+			for (int i = 0; i < 4; ++i)
+				platform_status[i]->setText(inputs[i]->text().trimmed().isEmpty()
+								    ? QString::fromUtf8("Não configurada")
+								    : QString::fromUtf8("Conectando..."));
 			*channel = twitchChannel(inputs[0]->text());
 			const QString kick_name = kickChannel(inputs[1]->text());
 			kick->start(kick_name);
-			startCapture(*channel, kick_name, tiktokChannel(inputs[3]->text()));
-			youtube->start(youtubeVideoId(inputs[2]->text()));
+			startCapture(*channel, kick_name, inputs[3]->text().trimmed());
+			youtube->start(youtubeSource(inputs[2]->text()));
 			buffer->clear();
 			retry->stop();
 			socket->abort();
 			if (!channel->isEmpty()) {
 				connectChat();
-			} else if (inputs[1]->text().trimmed().isEmpty() && inputs[2]->text().trimmed().isEmpty() &&
-				   inputs[3]->text().trimmed().isEmpty()) {
-				status->setText(QString::fromUtf8(
-					"Fontes salvas. Preencha Twitch para iniciar a captura real."));
 			}
 		});
 	*channel = twitchChannel(inputs[0]->text());
 	capture_twitch_channel = *channel;
 	capture_kick_channel = kickChannel(inputs[1]->text());
-	capture_tiktok_channel = tiktokChannel(inputs[3]->text());
+	capture_tiktok_url = inputs[3]->text().trimmed();
 	kick->start(capture_kick_channel);
-	youtube->start(youtubeVideoId(inputs[2]->text()));
+	youtube->start(youtubeSource(inputs[2]->text()));
 	if (!channel->isEmpty())
 		connectChat();
 	if (!obs_frontend_add_dock_by_id("zosma-multichat", "Multichat", body)) {
@@ -1232,11 +1592,11 @@ bool obs_module_load(void)
 	QObject::connect(capture_retry, &QTimer::timeout, body, []() {
 		if ((!capture_twitch_channel.isEmpty() && !twitch_capture) ||
 		    (!capture_kick_channel.isEmpty() && !kick_capture) ||
-		    (!capture_tiktok_channel.isEmpty() && !tiktok_capture))
-			startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
+		    (!capture_tiktok_url.isEmpty() && !tiktok_capture))
+			startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_url);
 	});
 	capture_retry->start();
-	startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_channel);
+	startCapture(capture_twitch_channel, capture_kick_channel, capture_tiktok_url);
 	dock_registered = true;
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	obs_log(LOG_INFO, "Multichat test dock loaded");
@@ -1251,11 +1611,22 @@ void obs_module_unload(void)
 	overlay_messages = QJsonArray();
 	panel_history.clear();
 	panel_view = nullptr;
-	capture_status = nullptr;
+#ifdef _WIN32
+	notification_owner = nullptr;
+#else
+	notification_sound = nullptr;
+#endif
+	capture_status_twitch = nullptr;
+	capture_status_kick = nullptr;
+	capture_status_tiktok = nullptr;
 	capture_state.clear();
-	if (asset_timer)
-		asset_timer->stop();
-	stopCapture();
+	// OBS_FRONTEND_EVENT_EXIT already closes browser widgets while Qt is alive.
+	// Do not inspect QPointers again after the frontend has torn them down.
+	if (!shutting_down) {
+		if (asset_timer)
+			asset_timer->stop();
+		stopCapture();
+	}
 	captured_badges.clear();
 	for (AssetRequest *request : asset_requests) {
 		curl_multi_remove_handle(asset_multi, request->handle);
@@ -1267,6 +1638,8 @@ void obs_module_unload(void)
 		curl_multi_cleanup(asset_multi);
 	asset_multi = nullptr;
 	asset_timer = nullptr;
+	panel_refresh_timer = nullptr;
+	overlay_refresh_timer = nullptr;
 	image_cache.clear();
 	image_bytes.clear();
 	image_tokens.clear();
@@ -1276,12 +1649,12 @@ void obs_module_unload(void)
 	twitch_badge_images = QJsonObject();
 	loaded_badge_catalogs.clear();
 	channel_badge_keys.clear();
-	if (overlay_server)
+	if (overlay_server && !shutting_down)
 		overlay_server->close();
 	overlay_server = nullptr;
 	overlay_clients.clear();
-	if (dock_registered) {
+	if (dock_registered && !shutting_down) {
 		obs_frontend_remove_dock("zosma-multichat");
-		dock_registered = false;
 	}
+	dock_registered = false;
 }

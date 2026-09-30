@@ -1,0 +1,28 @@
+name: Windows portable build
+on:
+  push:
+    branches:
+      - feature/tiktok-standalone-plugin
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Build Windows plugin
+        shell: pwsh
+        run: .github/scripts/Build-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+      - name: Package portable plugin
+        shell: pwsh
+        run: .github/scripts/Package-Windows.ps1 -Target x64 -Configuration RelWithDebInfo
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-multichat-windows-portable-${{ github.sha }}
+          path: release/*-windows-x64.zip
+          if-no-files-found: error
