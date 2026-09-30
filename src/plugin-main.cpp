@@ -30,6 +30,9 @@
 #include <QSet>
 #include <QTextDocument>
 #include <QTextOption>
+#include <QAbstractTextDocumentLayout>
+#include <QWheelEvent>
+#include <QKeyEvent>
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
@@ -82,6 +85,25 @@ static QTcpServer *overlay_server = nullptr;
 static QList<QPointer<QTcpSocket>> overlay_clients;
 static constexpr const char *overlay_name = "Zosma Multichat Web";
 static QPointer<QTextBrowser> panel_view;
+static bool panel_follow_bottom = true;
+
+class ChatPanel : public QTextBrowser {
+public:
+	using QTextBrowser::QTextBrowser;
+protected:
+	void wheelEvent(QWheelEvent *event) override
+	{
+		panel_follow_bottom = false;
+		QTextBrowser::wheelEvent(event);
+		panel_follow_bottom = verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 2;
+	}
+	void keyPressEvent(QKeyEvent *event) override
+	{
+		panel_follow_bottom = false;
+		QTextBrowser::keyPressEvent(event);
+		panel_follow_bottom = verticalScrollBar()->value() >= verticalScrollBar()->maximum() - 2;
+	}
+};
 static QPointer<QLabel> capture_status_twitch;
 static QPointer<QLabel> capture_status_kick;
 static QPointer<QLabel> capture_status_tiktok;
@@ -637,7 +659,7 @@ static void renderPanel()
 	if (!panel_view)
 		return;
 	auto *scroll = panel_view->verticalScrollBar();
-	const bool at_bottom = scroll->value() >= scroll->maximum() - 2;
+	const bool at_bottom = panel_follow_bottom;
 	const int previous = scroll->value();
 	QString html = "<html><body>";
 	for (const QJsonObject &entry : panel_history)
@@ -646,7 +668,8 @@ static void renderPanel()
 	// intermediate state off screen so the dock does not flash at the bottom.
 	panel_view->setUpdatesEnabled(false);
 	panel_view->setHtml(html + "</body></html>");
-	panel_view->document()->adjustSize();
+	// Force layout at the viewport width; adjustSize() changes the document width.
+	panel_view->document()->documentLayout()->documentSize();
 	scroll->setValue(at_bottom ? scroll->maximum() : qMin(previous, scroll->maximum()));
 	panel_view->setUpdatesEnabled(true);
 }
@@ -778,7 +801,7 @@ static void appendChat(const QString &platform, const QString &name, const QStri
 		renderPanel();
 	} else if (panel_view) {
 		auto *scroll = panel_view->verticalScrollBar();
-		const bool at_bottom = scroll->value() >= scroll->maximum() - 2;
+		const bool at_bottom = panel_follow_bottom;
 		const int previous = scroll->value();
 		panel_view->append(panelEntryHtml(entry));
 		scroll->setValue(at_bottom ? scroll->maximum() : previous);
@@ -1177,12 +1200,25 @@ bool obs_module_load(void)
 			capture_window->activateWindow();
 		}
 	});
-	auto *messages = new QTextBrowser(body);
+	auto *messages = new ChatPanel(body);
 	panel_view = messages;
+	panel_follow_bottom = true;
+	auto *panel_scroll = messages->verticalScrollBar();
+	QObject::connect(panel_scroll, &QScrollBar::sliderMoved, body, [panel_scroll](int position) {
+		panel_follow_bottom = position >= panel_scroll->maximum() - 2;
+	});
+	QObject::connect(panel_scroll, &QScrollBar::actionTriggered, body, [panel_scroll](int) {
+		panel_follow_bottom = panel_scroll->sliderPosition() >= panel_scroll->maximum() - 2;
+	});
+	QObject::connect(panel_scroll, &QScrollBar::rangeChanged, body, [panel_scroll](int, int maximum) {
+		if (panel_follow_bottom)
+			panel_scroll->setValue(maximum);
+	});
 	auto *clear_messages = new QPushButton(QString::fromUtf8("Limpar mensagens"), chat_page);
 	chat_layout->addWidget(clear_messages);
 	QObject::connect(clear_messages, &QPushButton::clicked, body, []() {
 		panel_history.clear();
+		panel_follow_bottom = true;
 		renderPanel();
 	});
 	curl_global_init(CURL_GLOBAL_DEFAULT);
