@@ -279,7 +279,9 @@ void YouTubeClient::start(const QString &source)
 						report(QString::fromUtf8("YouTube: o chat foi encerrado."));
 						break;
 					}
-					waitMs = std::clamp(token.value("timeoutMs").toInt(10000), 1000, 60000);
+					// Keep the multichat responsive instead of collecting long batches.
+					// Failed requests retain the longer backoff above.
+					waitMs = std::clamp(token.value("timeoutMs").toInt(2000), 1000, 2500);
 				}
 				wait(waitMs);
 			}
