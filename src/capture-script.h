@@ -12,6 +12,8 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
     } catch (_) {}
   }
   const sent = new Map();
+  const convertedImages = new Map();
+  let scanning = false;
   const selector = platform === 'Twitch'
     ? '.chat-line__message, [data-a-target="chat-line-message"]'
     : '[data-index], [data-chat-entry], .chat-entry, .chat-message';
@@ -23,6 +25,8 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
     : 'svg[data-ds-icon], img[src], .badge-tooltip svg';
   async function imageFor(node) {
     if (node.tagName !== 'svg') return node.currentSrc || node.src || '';
+    const signature = node.outerHTML;
+    if (convertedImages.has(signature)) return convertedImages.get(signature);
     try {
       const svg = new XMLSerializer().serializeToString(node);
       const image = new Image();
@@ -31,10 +35,16 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       const canvas = document.createElement('canvas');
       canvas.width = 40; canvas.height = 40;
       canvas.getContext('2d').drawImage(image, 0, 0, 40, 40);
-      return canvas.toDataURL('image/png');
+      const result = canvas.toDataURL('image/png');
+      convertedImages.set(signature, result);
+      if (convertedImages.size > 256) convertedImages.delete(convertedImages.keys().next().value);
+      return result;
     } catch (_) { return ''; }
   }
   async function scan() {
+    if (scanning) return;
+    scanning = true;
+    try {
     const rows = [...document.querySelectorAll(selector)].slice(-45);
     let found = 0;
     for (const row of rows) {
@@ -52,7 +62,7 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       const signature = badgeNodes.map(n => n.outerHTML).join('|');
       if (sent.get(name) === signature) continue;
       sent.set(name, signature);
-      if (sent.size > 100) sent.delete(sent.keys().next().value);
+      if (sent.size > 1000) sent.delete(sent.keys().next().value);
       const badges = [];
       for (const node of badgeNodes.slice(0, 15)) {
         const image = await imageFor(node);
@@ -64,8 +74,12 @@ static constexpr const char *capture_script = R"SCRIPT((() => {
       window.__zosmaStatusAt = Date.now();
       report({type:'status',platform,rows:rows.length,found,url:location.href});
     }
+    } finally { scanning = false; }
   }
-  const observer = new MutationObserver(() => { clearTimeout(window.__zosmaScanTimer); window.__zosmaScanTimer = setTimeout(scan, 100); });
+  const observer = new MutationObserver(() => {
+    if (window.__zosmaScanTimer) return;
+    window.__zosmaScanTimer = setTimeout(() => { window.__zosmaScanTimer = null; scan(); }, 250);
+  });
   function start() { observer.observe(document.documentElement, {subtree:true,childList:true,attributes:true,attributeFilter:['src']}); scan(); }
   if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start, {once:true});
   setInterval(scan, 8000);
